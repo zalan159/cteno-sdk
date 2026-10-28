@@ -1,0 +1,60 @@
+name: Validate daemon candidate
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Immutable candidate release containing bundles + SHA256SUMS'
+        required: true
+      daemon:
+        description: 'Bundle version'
+        required: true
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: darwin-x64, os: macos-15-intel, wheel: macosx_10_15_x86_64 }
+          - { target: darwin-arm64, os: macos-14, wheel: macosx_11_0_arm64 }
+          - { target: linux-x64, os: ubuntu-22.04, wheel: manylinux_2_34_x86_64 }
+          - { target: win32-x64, os: windows-latest, wheel: win_amd64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Download and verify immutable candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+          DAEMON: ${{ inputs.daemon }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bundles" "$RUNNER_TEMP/pkgs"
+          gh release download "$RELEASE" --pattern "cteno-sdk-daemon-$DAEMON-$TARGET.tar.gz" --pattern SHA256SUMS --dir "$RUNNER_TEMP/bundles"
+          cd "$RUNNER_TEMP/bundles"
+          python - <<'PY'
+          import hashlib,os,pathlib
+          name=f"cteno-sdk-daemon-{os.environ['DAEMON']}-{os.environ['TARGET']}.tar.gz"
+          entries=dict((line.split()[1],line.split()[0]) for line in pathlib.Path('SHA256SUMS').read_text().splitlines())
+          assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()==entries[name]
+          PY
+      - name: Pack and run full clean Agent installation
+        shell: bash
+        env:
+          DAEMON: ${{ inputs.daemon }}
+          TARGET: ${{ matrix.target }}
+          WHEEL: ${{ matrix.wheel }}
+        run: |
+          set -euo pipefail
+          node scripts/pack-platform.mjs --target "$TARGET" --payload "$RUNNER_TEMP/bundles/cteno-sdk-daemon-$DAEMON-$TARGET.tar.gz" --out "$RUNNER_TEMP/out" --wheel
+          (cd "$RUNNER_TEMP/out/npm/sdk-$TARGET" && npm pack --pack-destination "$RUNNER_TEMP/pkgs")
+          (cd js && npm ci && npm pack --pack-destination "$RUNNER_TEMP/pkgs")
+          cp "$RUNNER_TEMP/out/wheel/"*.whl "$RUNNER_TEMP/pkgs/"
+          bash scripts/e2e/install-test.sh "$RUNNER_TEMP/pkgs" "$TARGET" "$WHEEL"
