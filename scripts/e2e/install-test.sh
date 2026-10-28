@@ -17,11 +17,15 @@ mkdir "$WORK/app" && cd "$WORK/app" && npm init -y >/dev/null
 SDK=$(ls "$PKGS"/cteno-sdk-[0-9]*.tgz)
 npm install --no-audit --no-fund "$PKGS/cteno-sdk-$TARGET-"*.tgz "$SDK"
 cp "$HERE/consumer.mjs" . && node consumer.mjs | grep -v -- '-frames"' | tee "$WORK/node.txt"
+# Regression (2.10.11): restart on the SAME home, request immediately after open().
+cp "$HERE/restart-immediate.mjs" . && node restart-immediate.mjs | tee -a "$WORK/node.txt"
 
 "$PY" -m venv "$WORK/venv"
 VPY="$WORK/venv/bin/python"; [ -x "$VPY" ] || VPY="$WORK/venv/Scripts/python.exe"
 "$VPY" -m pip install -q --no-index "$PKGS"/cteno_sdk-*-py3-none-"$TAG".whl
+# Python runs on the home Node already used: this is a second start too.
 mkdir "$WORK/py" && cd "$WORK/py" && "$VPY" "$HERE/consumer.py" | tee "$WORK/py.txt"
+mkdir "$WORK/py2" && cd "$WORK/py2" && "$VPY" "$HERE/consumer.py" | tee -a "$WORK/py.txt"
 if grep -Eq '"ok": ?false' "$WORK/node.txt" "$WORK/py.txt"; then echo "install-test: FAIL ($TARGET)"; exit 1; fi
 grep -Eq '"check": ?"quickstart", ?"ok": ?true' "$WORK/py.txt" || { echo "install-test: FAIL (python quickstart)"; exit 1; }
 echo "install-test: PASS ($TARGET)"

@@ -1,6 +1,6 @@
 {
   "name": "cteno-sdk",
-  "source_commit": "fc2515e704844c227cb004a899abfcb0bc4b6e17",
-  "exported_at": "2026-10-28T05:33:28Z",
+  "source_commit": "3130a6e1fe6daf04fb7e7674b200cc0ae91fb744",
+  "exported_at": "2026-10-28T16:40:45Z",
   "note": "Exported from an internal monorepo by an allowlist; do not edit here, send changes upstream."
 }

@@ -51,7 +51,22 @@ export const TARGETS = {
   'win32-x64': { os: 'win32', cpu: 'x64', wheel: 'win_amd64', exe: '.exe' },
 };
 const BINARIES = ['cteno-host-cli', 'cteno-wiki', 'secret-exec', 'rg'];
-const REQUIRED = new Set(['cteno-host-cli']);
+const RESOURCES = ['tools', 'skills', 'agents', 'plugins'];
+
+export function validatePayloadInputs(binDir, resources, target) {
+  const t = TARGETS[target];
+  if (!t) throw new Error(`unknown target ${target}`);
+  for (const name of BINARIES) {
+    const p = join(binDir, name + t.exe);
+    if (!existsSync(p) || !statSync(p).isFile() || statSync(p).size === 0)
+      throw new Error(`missing required binary: ${p}`);
+  }
+  for (const name of RESOURCES) {
+    const p = join(resources, name);
+    if (!existsSync(p) || !statSync(p).isDirectory() || readdirSync(p).length === 0)
+      throw new Error(`missing required resource: ${p}`);
+  }
+}
 
 function fail(message) { console.error(`pack-platform: ${message}`); process.exit(2); }
 
@@ -59,24 +74,18 @@ function fail(message) { console.error(`pack-platform: ${message}`); process.exi
 export function stagePayload({ dir, target, binDir, resources, daemonVersion, license }) {
   const t = TARGETS[target];
   if (!t) fail(`unknown target ${target}`);
+  validatePayloadInputs(binDir, resources, target);
   mkdirSync(join(dir, 'bin'), { recursive: true });
   const shipped = [];
   for (const name of BINARIES) {
     const file = name + t.exe;
     const from = join(binDir, file);
-    if (!existsSync(from)) {
-      if (REQUIRED.has(name)) fail(`missing ${from}`);
-      console.warn(`pack-platform: ${file} not found in ${binDir}; skipping (feature degrades)`);
-      continue;
-    }
     cpSync(from, join(dir, 'bin', file));
     if (!t.exe) chmodSync(join(dir, 'bin', file), 0o755);
     shipped.push(file);
   }
-  for (const sub of ['tools', 'skills', 'agents']) {
-    const from = join(resources, sub);
-    if (existsSync(from)) cpSync(from, join(dir, sub), { recursive: true });
-    else mkdirSync(join(dir, sub), { recursive: true });
+  for (const sub of RESOURCES) {
+    cpSync(join(resources, sub), join(dir, sub), { recursive: true });
   }
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify({
     schemaVersion: 1, sku: 'sdk-core', version: daemonVersion, target, binaries: shipped,
@@ -96,8 +105,10 @@ export function openPayload(payload) {
 
 /** Copy a staged payload (bin/, resources, manifest, license) into `dir`. */
 function copyPayload(payloadDir, dir) {
+  const manifest = JSON.parse(readFileSync(join(payloadDir, 'manifest.json'), 'utf8'));
+  validatePayloadInputs(join(payloadDir, 'bin'), payloadDir, manifest.target);
   for (const name of readdirSync(payloadDir)) cpSync(join(payloadDir, name), join(dir, name), { recursive: true });
-  return JSON.parse(readFileSync(join(payloadDir, 'manifest.json'), 'utf8'));
+  return manifest;
 }
 
 export function npmPackage({ out, target, version, payloadDir }) {
@@ -117,7 +128,7 @@ export function npmPackage({ out, target, version, payloadDir }) {
     homepage: 'https://github.com/zalan159/cteno-sdk#readme',
     repository: { type: 'git', url: 'git+https://github.com/zalan159/cteno-sdk.git' },
     os: [t.os], cpu: [t.cpu],
-    files: ['bin', 'tools', 'skills', 'agents', 'manifest.json', 'LICENSE.daemon', 'README.md'],
+    files: ['bin', ...RESOURCES, 'manifest.json', 'LICENSE.daemon', 'README.md'],
     preferUnplugged: true,
     cteno: { daemonVersion },
     publishConfig: { access: 'public', provenance: true },

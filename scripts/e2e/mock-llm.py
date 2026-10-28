@@ -45,7 +45,7 @@ class H(BaseHTTPRequestHandler):
         wants = "PROBE_TOOL" in json.dumps(req)
         call = CALL if wants and CALL and CALL in tool_names(req) and not has_tool_result(req) else ""
         with open(LOG, "a") as f:
-            f.write(json.dumps({"path": self.path, "stream": bool(req.get("stream")), "call": call,
+            f.write(json.dumps({"path": self.path, "stream": bool(req.get("stream")), "call": call, "probe": wants, "ntools": len(tool_names(req)),
                                 "outputs": [str(i.get("output"))[:400] for i in (req.get("input") or []) if isinstance(i, dict) and i.get("type") == "function_call_output"]
                                 + [str(m.get("content"))[:400] for m in (req.get("messages") or []) if isinstance(m, dict) and m.get("role") == "tool"]}) + "\n")
         if self.path.endswith("/responses"):
