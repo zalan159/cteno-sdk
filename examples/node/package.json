@@ -1,0 +1,9 @@
+{
+  "name": "cteno-sdk-examples",
+  "private": true,
+  "type": "module",
+  "description": "Runnable examples for @cteno/sdk. Build ../../js first, then npm install here.",
+  "dependencies": {
+    "@cteno/sdk": "file:../../js"
+  }
+}

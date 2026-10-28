@@ -22,7 +22,9 @@
  * semver and which are daemon internals you may still call at your own risk.
  */
 import { connectNodeIpc } from './node.js';
-import { discoverOwnerEndpoints, type OwnerEndpoint } from './discover.js';
+import { resolve as resolvePath } from 'node:path';
+import { type OwnerEndpoint } from './discover.js';
+import { ensureDaemon, type DaemonHandle, type DaemonOptions } from './daemon.js';
 import { methodTier } from './method-tiers.js';
 import { SdkError, type CallOptions, type JsonValue, type Transport } from './index.js';
 
@@ -92,19 +94,44 @@ export type CtenoMessage = UserMessage | AssistantMessage | ResultMessage | Stat
 /**
  * How the agent handles a tool it is not pre-authorised to run.
  *
- * This matters more here than in a CLI: a permission prompt is answered in the
- * Cteno UI, so an unattended SDK consumer that leaves this at `default` will
- * see the turn stall on a card nobody can answer and then time out. Pick the
- * mode that matches how much you trust the prompt.
+ * Read-only tools (read, grep, glob, …) never ask. For everything else the
+ * daemon raises an approval request, and there is no Cteno app attached to
+ * the SDK's daemon to answer it. The SDK therefore answers it for you:
+ * {@link CanUseTool} if you pass one, otherwise it DENIES the request at once
+ * and the model is told why. A turn never stalls waiting for a human.
  *
- * - `default` — ask for anything not pre-approved. Correct when a human is
- *   watching the Cteno app; wrong for unattended runs.
- * - `acceptEdits` — file edits proceed, other tools still ask.
- * - `bypassPermissions` — never ask. The usual choice for automation, and only
- *   safe when you control the prompt and the working directory.
+ * - `default` — every non-read-only tool goes through the approval above.
+ * - `acceptEdits` — file edits run; other tools go through approval.
+ * - `bypassPermissions` — nothing asks. Only for a prompt and working
+ *   directory you control.
  * - `plan` — no mutations at all; the agent plans instead of acting.
  */
 export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+
+/** One approval request, as the daemon raised it. */
+export interface PermissionRequest {
+  sessionId: string;
+  /** Request id; also the tool call id. */
+  id: string;
+  toolName: string;
+  /** The tool input (may be truncated by the daemon for very large inputs). */
+  input: unknown;
+  description?: string;
+}
+
+/** Your answer. `allow: false` may carry a `reason` the model reads. */
+export type PermissionAnswer = { allow: true } | { allow: false; reason?: string };
+
+/**
+ * Decide an approval request. Throwing, or not answering within the daemon's
+ * approval timeout, denies it.
+ */
+export type CanUseTool = (request: PermissionRequest) => PermissionAnswer | Promise<PermissionAnswer>;
+
+/** The answer when no {@link CanUseTool} is set. */
+export const NO_APPROVER_REASON =
+  'No approver is attached to this SDK session, so tools that need approval are denied. ' +
+  'The developer can allow them with permissionMode or a canUseTool callback.';
 
 export interface QueryOptions {
   /** The prompt to send. */
@@ -116,11 +143,13 @@ export interface QueryOptions {
   /** Model/profile id, as listed by `listProfiles()`. Host default if unset. */
   model?: string;
   /**
-   * How to handle tool permission prompts. Only applies when `query` creates
-   * the session. Unattended callers almost always want `bypassPermissions`;
-   * leaving this unset means an unexpected tool call stalls until it times out.
+   * How to handle tools that need approval. Only applies when `query` creates
+   * the session. See {@link PermissionMode}: without `canUseTool` such tools
+   * are denied immediately rather than stalling.
    */
   permissionMode?: PermissionMode;
+  /** Approve or deny tool calls that need approval. See {@link CanUseTool}. */
+  canUseTool?: CanUseTool;
   /** Session title. Only used when creating a new session. */
   title?: string;
   /**
@@ -129,8 +158,14 @@ export interface QueryOptions {
    * See {@link AgentSpec}.
    */
   agent?: AgentSpec;
-  /** Explicit socket path. Defaults to auto-discovery. */
+  /**
+   * Connect to this socket / pipe instead of the SDK's own daemon. This is
+   * the only way to reach a daemon the SDK did not start (for example the
+   * Cteno desktop app's).
+   */
   socketPath?: string;
+  /** Options for the SDK's own daemon. Ignored with `socketPath`. */
+  daemon?: DaemonOptions;
   /** Abort the local wait. Does NOT prove the host stopped working. */
   signal?: AbortSignal;
   /** Per-turn deadline. Defaults to 10 minutes. */
@@ -153,6 +188,7 @@ export interface QueryOptions {
 export async function* query(options: QueryOptions): AsyncGenerator<CtenoMessage, void, void> {
   const session = await CtenoSession.open({
     socketPath: options.socketPath,
+    daemon: options.daemon,
     signal: options.signal,
   });
   const createdHere = !options.sessionId;
@@ -174,6 +210,7 @@ export async function* query(options: QueryOptions): AsyncGenerator<CtenoMessage
       prompt: options.prompt,
       signal: options.signal,
       timeoutMs: options.timeoutMs,
+      canUseTool: options.canUseTool,
     });
   } finally {
     if (shouldClose && sessionId) {
@@ -234,8 +271,13 @@ export interface SessionTrace {
 }
 
 export interface OpenOptions {
-  /** Explicit socket path; skips discovery. */
+  /**
+   * Connect to this socket / pipe instead of the SDK's own daemon. The only
+   * way to reach a daemon the SDK did not start.
+   */
   socketPath?: string;
+  /** Options for the SDK's own daemon. Ignored with `socketPath`. */
+  daemon?: DaemonOptions;
   signal?: AbortSignal;
   timeoutMs?: number;
 }
@@ -253,36 +295,81 @@ export class CtenoSession {
     /** The daemon's machine id; every business method is namespaced by it. */
     readonly machineId: string,
     readonly endpoint: OwnerEndpoint | null,
+    /** The SDK daemon this session attached to; null with an explicit `socketPath`. */
+    readonly daemon: DaemonHandle | null = null,
   ) {}
 
-  /** Connect to the owner socket, auto-discovering it unless told otherwise. */
+  /**
+   * Connect to the SDK's own daemon, starting it if it is not running.
+   *
+   * The SDK's daemon is separate from any Cteno desktop app on this machine:
+   * its own data, sockets, machine id and logs, local mode, no login. Pass
+   * `socketPath` to connect to a different daemon instead.
+   */
   static async open(options: OpenOptions = {}): Promise<CtenoSession> {
-    const candidates: OwnerEndpoint[] = options.socketPath
-      ? [{ path: options.socketPath, hostRoot: '', kind: 'dev' }]
-      : discoverOwnerEndpoints();
-    if (candidates.length === 0) {
-      throw new SdkError('TRANSPORT',
-        'No Cteno daemon socket found. Start the daemon, or pass socketPath / set CTENO_HOST_ROOT.');
+    let handle: DaemonHandle | null = null;
+    let endpoint: OwnerEndpoint;
+    if (options.socketPath) {
+      endpoint = { path: options.socketPath, hostRoot: '', kind: 'release' };
+    } else {
+      handle = await ensureDaemon({ ...options.daemon, signal: options.signal ?? options.daemon?.signal });
+      endpoint = { path: handle.layout.endpoint, hostRoot: handle.layout.hostRoot, kind: 'release' };
     }
-    let lastError: unknown;
-    for (const endpoint of candidates) {
-      let transport: Transport | undefined;
-      try {
-        transport = await connectNodeIpc(endpoint.path, {
-          signal: options.signal,
-          timeoutMs: options.timeoutMs ?? 10_000,
-        });
-        // A stale socket file connects and then goes nowhere, so liveness is
-        // only proven by a reply. hello also carries the machine id we need.
-        const machineId = await resolveMachineId(transport, options);
-        return new CtenoSession(transport, machineId, endpoint);
-      } catch (error) {
-        lastError = error;
-        transport?.close();
+    let transport: Transport | undefined;
+    try {
+      transport = await connectNodeIpc(endpoint.path, {
+        signal: options.signal,
+        timeoutMs: options.timeoutMs ?? 10_000,
+      });
+      // A stale socket file connects and then goes nowhere, so liveness is
+      // only proven by a reply. It also carries the machine id we need.
+      const machineId = await resolveMachineId(transport, options);
+      return new CtenoSession(transport, machineId, endpoint, handle);
+    } catch (error) {
+      transport?.close();
+      throw new SdkError('TRANSPORT',
+        options.socketPath
+          ? `Could not reach a Cteno daemon at ${options.socketPath}`
+          : `Could not reach the SDK's Cteno daemon at ${endpoint.path}`, error);
+    }
+  }
+
+  /**
+   * Add a model profile and make it the default for new sessions.
+   *
+   * The SDK's daemon runs in local mode with your own model key (BYOK). It
+   * stores the key in its own data directory, not in a Cteno app's.
+   */
+  async configureModel(model: ModelConfig, options: CallOptions = {}): Promise<string> {
+    const id = model.id ?? 'sdk-default';
+    const endpoint = {
+      base_url: model.baseUrl,
+      model: model.model,
+      api_key: model.apiKey,
+      temperature: 0.7,
+      max_tokens: model.maxTokens ?? 8192,
+      context_window_tokens: model.contextWindowTokens ?? null,
+    };
+    const saved = await this.call('save-profile', {
+      profile: {
+        id,
+        name: model.name ?? model.model,
+        api_format: model.apiFormat ?? 'openai',
+        chat: endpoint as unknown as JsonValue,
+        compress: { ...endpoint, temperature: 0.3 } as unknown as JsonValue,
+        supports_vision: model.supportsVision ?? false,
+      },
+    }, { ...options, quiet: true });
+    if (object(saved) && saved.success === false) {
+      throw new SdkError('REMOTE', String(saved.error ?? 'save-profile failed'), saved);
+    }
+    if (model.makeDefault !== false) {
+      const made = await this.call('set-default-profile', { profileId: id }, { ...options, quiet: true });
+      if (object(made) && made.success === false) {
+        throw new SdkError('REMOTE', String(made.error ?? 'set-default-profile failed'), made);
       }
     }
-    throw new SdkError('TRANSPORT',
-      `Could not reach a Cteno daemon (tried ${candidates.length} socket(s))`, lastError);
+    return id;
   }
 
   /**
@@ -296,7 +383,9 @@ export class CtenoSession {
    */
   async create(options: CreateOptions = {}): Promise<string> {
     const params: Record<string, JsonValue> = { ...(options.extraParams ?? {}) };
-    if (options.cwd) params.workdir = options.cwd;
+    // The daemon resolves a relative path against ITS working directory, not
+    // ours, so make it absolute here: `cwd: '.'` means the caller's directory.
+    if (options.cwd) params.workdir = resolvePath(options.cwd);
     if (options.model) params.modelId = options.model;
     if (options.title) params.title = options.title;
     if (options.permissionMode) params.permissionMode = options.permissionMode;
@@ -314,7 +403,17 @@ export class CtenoSession {
     }
     if (options.scheduledTaskId) params.scheduledTaskId = options.scheduledTaskId;
     const wire = options.spec ? specToWire(options.spec) : undefined;
-    if (wire) params.sdk = wire;
+    if (wire) {
+      // An older daemon would silently ignore `sdk` (and reject client tools
+      // later with an opaque error), so refuse before creating anything.
+      const hello = await this.transport.request('__rpc.hello', {}, options);
+      const capabilities = object(hello) && Array.isArray(hello.capabilities) ? hello.capabilities : [];
+      if (!capabilities.includes(AGENT_SPEC_CAPABILITY)) {
+        throw new SdkError('PROTOCOL',
+          `This Cteno daemon does not support agent specs (${AGENT_SPEC_CAPABILITY}); upgrade Cteno to 2.10.10 or newer`, hello);
+      }
+      params.sdk = wire;
+    }
     const result = await this.call('create-thread', params, options);
     if (!object(result)) throw new SdkError('PROTOCOL', 'create-thread returned a non-object');
     if (result.success === false) {
@@ -388,7 +487,7 @@ export class CtenoSession {
    * (the `final_result` tool input, parsed) or a terminal tool returned JSON;
    * `text` is the final assistant text.
    */
-  async run(options: { sessionId: string; prompt: string; signal?: AbortSignal; timeoutMs?: number }): Promise<RunResult> {
+  async run(options: { sessionId: string; prompt: string; signal?: AbortSignal; timeoutMs?: number; canUseTool?: CanUseTool }): Promise<RunResult> {
     const messages: CtenoMessage[] = [];
     let ok = false;
     let error: string | undefined;
@@ -441,6 +540,8 @@ export class CtenoSession {
   async *send(options: {
     sessionId: string; prompt: string;
     signal?: AbortSignal; timeoutMs?: number;
+    /** Decide tool approvals. Without it, approvals are denied at once. */
+    canUseTool?: CanUseTool;
   }): AsyncGenerator<CtenoMessage, void, void> {
     const { sessionId, prompt } = options;
     if (!sessionId) throw new TypeError('sessionId is required');
@@ -456,6 +557,33 @@ export class CtenoSession {
     };
 
     const unsubscribe = this.onSessionEvent(sessionId, push);
+    // A parked approval ends the daemon's turn early and resumes it in a new
+    // turn once answered; the caller's turn is over only when that resumed
+    // turn is too. `parked` counts answered parks whose resume has not ended.
+    // The host refuses to resume while the parking turn is still running, so
+    // card answers are held until the session is idle (`busy` false).
+    const gate = {
+      parked: 0, replied: false, ok: true, error: undefined as string | undefined,
+      busy: true, held: [] as Array<() => void>,
+    };
+    const settle = () => {
+      if (gate.replied && gate.parked === 0) {
+        gate.replied = false;
+        push(gate.ok ? { type: 'result', sessionId, ok: true } : { type: 'result', sessionId, ok: false, error: gate.error });
+      }
+    };
+    const flush = () => {
+      if (gate.busy) return;
+      const held = gate.held.splice(0);
+      for (const answer of held) answer();
+    };
+    const unapprove = this.answerPermissions(sessionId, options.canUseTool, {
+      parked: () => { gate.parked += 1; },
+      // The resumed turn ends with `task_complete` id `confirmation:<cardId>`.
+      resumed: () => { if (gate.parked > 0) { gate.parked -= 1; settle(); notify?.(); } },
+      whenIdle: answer => { gate.held.push(answer); flush(); },
+      alive: thinking => { gate.busy = thinking; flush(); },
+    });
     try {
       await this.subscribe(options);
       // `wait: true` makes the host hold the reply until the turn completes,
@@ -466,13 +594,17 @@ export class CtenoSession {
       }, { signal: options.signal, timeoutMs: options.timeoutMs ?? 600_000 })
         .then(result => {
           if (object(result) && result.success === false) {
-            push({ type: 'result', sessionId, ok: false, error: String(result.error ?? 'send failed') });
-          } else {
-            push({ type: 'result', sessionId, ok: true });
+            gate.ok = false; gate.error = String(result.error ?? 'send failed');
           }
+          gate.replied = true;
+          gate.busy = false;
+          settle();
+          flush();
         })
         .catch(error => { failure = error; })
         .finally(() => { finished = true; notify?.(); });
+      // Bounds the wait for a resumed (post-approval) turn as well.
+      const deadline = Date.now() + (options.timeoutMs ?? 600_000);
 
       while (true) {
         while (queue.length > 0) {
@@ -480,13 +612,20 @@ export class CtenoSession {
           yield message;
           if (message.type === 'result') { await turn; return; }
         }
-        if (finished) break;
-        await new Promise<void>(resolve => { notify = resolve; });
+        if (finished && (failure || gate.parked === 0)) break;
+        if (Date.now() > deadline) {
+          throw new SdkError('TIMEOUT', 'Turn did not finish after a tool approval; host execution may continue');
+        }
+        await new Promise<void>(resolve => {
+          notify = resolve;
+          if (finished) setTimeout(resolve, 500);
+        });
         notify = null;
       }
       await turn;
       if (failure) throw failure;
     } finally {
+      unapprove();
       unsubscribe();
     }
   }
@@ -509,10 +648,12 @@ export class CtenoSession {
     const result = await this.call('list-sessions', {}, options);
     const raw = object(result) ? result.sessions : result;
     if (!Array.isArray(raw)) return [];
+    // The daemon keeps title/path under `metadata`; older rows had them top level.
+    const str = (...values: unknown[]) => values.find((v): v is string => typeof v === 'string' && v !== '');
     return raw.filter(object).map(session => ({
       id: String(session.id ?? ''),
-      title: typeof session.title === 'string' ? session.title : undefined,
-      workdir: typeof session.path === 'string' ? session.path : undefined,
+      title: str(session.title, object(session.metadata) ? session.metadata.name : undefined),
+      workdir: str(session.path, object(session.metadata) ? session.metadata.path : undefined),
       active: session.active === true,
       updatedAt: typeof session.activeAt === 'number' ? session.activeAt : undefined,
     }));
@@ -690,6 +831,57 @@ export class CtenoSession {
     // never asked, so a one-shot RPC caller is never confused by stray frames.
     await this.transport.request('__rpc.subscribe', {}, options);
     this.subscribed = true;
+  }
+
+  /**
+   * Answer the daemon's approval requests for one session.
+   *
+   * The daemon publishes each request as an ACP `permission-request` frame
+   * on the session and waits on `<sessionId>:permission`. With no approver
+   * UI attached, the SDK is the only party that can answer, so it always
+   * does: `canUseTool`'s verdict, or a denial with a reason the model reads.
+   */
+  private answerPermissions(
+    sessionId: string,
+    canUseTool: CanUseTool | undefined,
+    hooks: { parked: () => void; resumed: () => void; whenIdle: (answer: () => void) => void; alive: (thinking: boolean) => void },
+  ): () => void {
+    const answered = new Set<string>();
+    const calls = new Map<string, { name: string; input: unknown }>();
+    return this.transport.onNotification(event => {
+      if (event.method !== 'local-session-event' || !object(event.params)) return;
+      const payload = event.params.payload;
+      if (!object(payload) || payload.sessionId !== sessionId) return;
+      if (event.params.channel === 'local-session:alive') { hooks.alive(payload.thinking === true); return; }
+      if (event.params.channel !== 'local-session:message-appended' || !object(payload.message)) return;
+      const resumedCard = resumedCardOf(payload.message);
+      if (resumedCard && answered.has(resumedCard)) { hooks.resumed(); return; }
+      const request = permissionRequestOf(payload.message, sessionId, calls);
+      if (!request || answered.has(request.id)) return;
+      answered.add(request.id);
+      if (request.via === 'card') hooks.parked();
+      void (async () => {
+        let answer: PermissionAnswer;
+        try {
+          answer = canUseTool ? await canUseTool(request) : { allow: false, reason: NO_APPROVER_REASON };
+        } catch (error) {
+          answer = { allow: false, reason: `canUseTool threw: ${error instanceof Error ? error.message : String(error)}` };
+        }
+        const reason = answer.allow ? undefined : (answer.reason ?? 'Denied by the SDK client');
+        try {
+          if (request.via === 'card') {
+            const params: Record<string, JsonValue> = { cardId: request.id, choiceIds: [answer.allow ? 'allow_once' : 'deny'], actor: 'sdk' };
+            if (reason) params.note = reason;
+            await new Promise<void>(resolve => hooks.whenIdle(resolve));
+            await this.call('card-answer', params, { quiet: true });
+          } else {
+            await this.transport.request(`${sessionId}:permission`, answer.allow
+              ? { id: request.id, approved: true }
+              : { id: request.id, approved: false, decision: 'denied', reason: reason as string });
+          }
+        } catch { /* Request already settled (timeout/abort) or connection closed. */ }
+      })();
+    });
   }
 
   /** Translate raw host notifications into typed messages for one session. */
@@ -881,6 +1073,76 @@ export interface TenantPolicy {
 }
 
 /** Wire form of an {@link AgentSpec}: handlers stripped, prompt normalized. */
+/** A BYOK model for the SDK's daemon. See {@link CtenoSession.configureModel}. */
+export interface ModelConfig {
+  /** Profile id. Default `sdk-default`; saving the same id again replaces it. */
+  id?: string;
+  name?: string;
+  /** Endpoint root, e.g. `https://api.openai.com/v1` or `https://api.deepseek.com/anthropic`. */
+  baseUrl: string;
+  model: string;
+  /** Your provider key. Stored in the SDK daemon's own data directory. */
+  apiKey: string;
+  /** Wire protocol of the endpoint (not the model vendor). Default `openai`. */
+  apiFormat?: 'openai' | 'anthropic' | 'gemini';
+  supportsVision?: boolean;
+  maxTokens?: number;
+  contextWindowTokens?: number;
+  /** Make it the default for new sessions. Default true. */
+  makeDefault?: boolean;
+}
+
+/** Card id whose resumed (post-answer) turn this row completes, if any. */
+export function resumedCardOf(entry: Record<string, unknown>): string | null {
+  if (typeof entry.text !== 'string' || !entry.text.includes('confirmation:')) return null;
+  try {
+    const data = (JSON.parse(entry.text) as { content?: { data?: { type?: unknown; id?: unknown } } }).content?.data;
+    if (data?.type !== 'task_complete' || typeof data.id !== 'string' || !data.id.startsWith('confirmation:')) return null;
+    return data.id.slice('confirmation:'.length);
+  } catch { return null; }
+}
+
+/**
+ * Extract an approval request from a stored message row, if it is one.
+ *
+ * Two daemon shapes: a parked call (a `tool-result` whose output is
+ * `{permissionPending:true, cardId}`, answered with `card-answer`), and the
+ * older in-turn `permission-request` frame (answered on `<session>:permission`).
+ * `calls` remembers tool-call frames so a parked result can name its tool.
+ */
+export function permissionRequestOf(
+  entry: Record<string, unknown>,
+  sessionId: string,
+  calls: Map<string, { name: string; input: unknown }> = new Map(),
+): (PermissionRequest & { via: 'card' | 'session' }) | null {
+  if (typeof entry.text !== 'string') return null;
+  let envelope: unknown;
+  try { envelope = JSON.parse(entry.text); } catch { return null; }
+  if (!object(envelope) || !object(envelope.content)) return null;
+  const data = envelope.content.data;
+  if (!object(data)) return null;
+  if (data.type === 'tool-call' && typeof data.callId === 'string') {
+    calls.set(data.callId, { name: String(data.name ?? ''), input: data.input });
+    return null;
+  }
+  if (data.type === 'tool-result' && typeof data.output === 'string') {
+    let output: unknown;
+    try { output = JSON.parse(data.output); } catch { return null; }
+    if (!object(output) || output.permissionPending !== true || typeof output.cardId !== 'string') return null;
+    const call = typeof data.callId === 'string' ? calls.get(data.callId) : undefined;
+    return { sessionId, id: output.cardId, toolName: call?.name ?? '', input: call?.input, via: 'card' };
+  }
+  if (data.type !== 'permission-request') return null;
+  const id = typeof data.permissionId === 'string' ? data.permissionId : '';
+  if (!id) return null;
+  return {
+    sessionId, id, via: 'session',
+    toolName: String(data.toolName ?? ''),
+    input: data.options,
+    description: typeof data.description === 'string' ? data.description : undefined,
+  };
+}
+
 export function specToWire(spec: AgentSpec): Record<string, JsonValue> {
   const wire: Record<string, JsonValue> = {};
   if (spec.systemPrompt !== undefined) {
@@ -991,3 +1253,9 @@ function extractText(raw: string): string {
   if (typeof parsed.text === 'string') return parsed.text;
   return raw;
 }
+
+export {
+  ensureDaemon, stopDaemon, instanceLayout, defaultInstanceRoot, resolveDaemonBinary,
+  platformPackageName, isolatedPipeName,
+  type DaemonHandle, type DaemonOptions, type DaemonBinary, type InstanceLayout,
+} from './daemon.js';

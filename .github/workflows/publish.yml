@@ -1,0 +1,199 @@
+name: Publish
+
+# Publishes @cteno/sdk + its five platform packages to npm, and cteno-sdk
+# (five platform wheels + an sdist) to PyPI.
+#
+# MANUAL ONLY. Pushing a tag or publishing a GitHub Release never triggers
+# this workflow; a maintainer runs it from the Actions tab, e.g.
+#   gh workflow run publish.yml -f ref=v0.2.0 -f daemon=2.10.10 -f confirm=publish
+#
+# Daemon binaries are NOT built here. Each platform's
+# `cteno-sdk-daemon-<daemon>-<target>.tar.gz` is a signed (macOS: notarized,
+# Windows: Authenticode) build from the Cteno release pipeline, attached with
+# a SHA256SUMS file to the GitHub Release `daemon-v<daemon>` of this repo.
+# This workflow downloads, verifies, packs, tests every platform package on
+# its native runner, and only then publishes. Only the platforms listed in
+# js/package.json `cteno.platforms` are packed, tested and published.
+#
+# Prerequisites (one-time):
+#   - npm:  repository secret NPM_TOKEN (publish rights on @cteno). The npm job
+#           fails fast with a clear message until it exists.
+#   - PyPI: trusted publishing bound to this repository, workflow `publish.yml`,
+#           environment `pypi`. Do not rename either.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag to publish (e.g. v0.2.0). Must match js/package.json and python/pyproject.toml.'
+        required: true
+      daemon:
+        description: 'Daemon version to bundle (GitHub Release daemon-v<daemon>), e.g. 2.10.10'
+        required: true
+      confirm:
+        description: 'Type "publish" to confirm'
+        required: true
+      targets:
+        description: 'What to publish'
+        type: choice
+        options: [both, npm, pypi]
+        default: both
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify ref and versions
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Require explicit confirmation
+        if: inputs.confirm != 'publish'
+        run: |
+          echo "::error::confirm input must be exactly 'publish'"
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - id: v
+        name: Tag must match every package version
+        run: |
+          case "${{ inputs.ref }}" in v*) ;; *) echo "::error::ref must be a v* tag"; exit 1;; esac
+          git rev-parse -q --verify "refs/tags/${{ inputs.ref }}" >/dev/null \
+            || { echo "::error::${{ inputs.ref }} is not a tag"; exit 1; }
+          tag="${{ inputs.ref }}"; tag="${tag#v}"
+          js=$(node -p "require('./js/package.json').version")
+          py=$(python3 -c "import tomllib;print(tomllib.load(open('python/pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$tag js=$js python=$py"
+          [ "$tag" = "$js" ] && [ "$tag" = "$py" ] || { echo "::error::version mismatch"; exit 1; }
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  pack:
+    name: Pack platform packages
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download and verify daemon bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/bundles" && cd "$RUNNER_TEMP/bundles"
+          gh release download "daemon-v${{ inputs.daemon }}" -R "${{ github.repository }}" \
+            -p "cteno-sdk-daemon-${{ inputs.daemon }}-*.tar.gz" -p SHA256SUMS
+          sha256sum -c SHA256SUMS
+          ls -la
+      - name: Pack npm platform packages and wheels
+        run: |
+          for t in $(node -p "require('./js/package.json').cteno.platforms.join(' ')"); do
+            node scripts/pack-platform.mjs --target "$t" --out "$RUNNER_TEMP/out" --wheel \
+              --payload "$RUNNER_TEMP/bundles/cteno-sdk-daemon-${{ inputs.daemon }}-$t.tar.gz"
+            (cd "$RUNNER_TEMP/out/npm/sdk-$t" && npm pack --pack-destination "$RUNNER_TEMP/out/tgz")
+          done
+      - name: Pack @cteno/sdk (with its platform optionalDependencies) and the sdist
+        run: |
+          # The platform packages only exist on npm once this run publishes
+          # them, so they are pinned into package.json here, at pack time,
+          # rather than in the source tree (that would break `npm ci`).
+          (cd js && npm ci && node ../scripts/pin-platform-deps.mjs package.json \
+            && npm pack --pack-destination "$RUNNER_TEMP/out/tgz")
+          python3 -m pip install build && (cd python && python3 -m build --sdist --outdir "$RUNNER_TEMP/out/wheel")
+      - name: Flatten into one directory
+        run: mkdir -p "$RUNNER_TEMP/pkgs" && cp "$RUNNER_TEMP"/out/tgz/*.tgz "$RUNNER_TEMP"/out/wheel/* "$RUNNER_TEMP/pkgs/" && ls -la "$RUNNER_TEMP/pkgs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: ${{ runner.temp }}/pkgs/*
+
+  test:
+    name: Install test / ${{ matrix.target }}
+    needs: pack
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-latest, wheel: manylinux_2_34_x86_64 }
+          - { target: darwin-x64, os: macos-13, wheel: macosx_10_15_x86_64 }
+          - { target: darwin-arm64, os: macos-latest, wheel: macosx_11_0_arm64 }
+          - { target: win32-x64, os: windows-latest, wheel: win_amd64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: ${{ runner.temp }}/pkgs
+      - name: npm install the packed tarballs and run the README flow
+        shell: bash
+        run: bash scripts/e2e/install-test.sh "${{ runner.temp }}/pkgs" "${{ matrix.target }}" "${{ matrix.wheel }}"
+
+  npm:
+    name: npm @cteno/sdk + platform packages
+    needs: [verify, test]
+    if: inputs.targets == 'both' || inputs.targets == 'npm'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write          # npm provenance
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Require NPM_TOKEN
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          [ -n "$NODE_AUTH_TOKEN" ] || { echo "::error::repository secret NPM_TOKEN is not set"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: pkgs
+      - name: Publish platform packages first, then @cteno/sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for f in pkgs/cteno-sdk-*-*.tgz; do npm publish "$f" --provenance --access public; done
+          npm publish pkgs/cteno-sdk-${{ needs.verify.outputs.version }}.tgz --provenance --access public
+
+  pypi:
+    name: PyPI cteno-sdk
+    needs: [verify, test]
+    if: inputs.targets == 'both' || inputs.targets == 'pypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/cteno-sdk
+    permissions:
+      contents: read
+      id-token: write          # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: pkgs
+      - run: mkdir dist && cp pkgs/*.whl pkgs/*.tar.gz dist/ && ls -la dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

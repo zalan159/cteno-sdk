@@ -269,6 +269,44 @@ test('listSessions and listProfiles normalize host rows', async () => {
   } finally { host.close(); }
 });
 
+test('listSessions reads title/workdir from daemon metadata rows', async () => {
+  // Real daemon rows carry the title and path under `metadata`, not top level.
+  const host = await startFakeHost({
+    'list-sessions': () => ({ sessions: [{ id: 's2', active: false, activeAt: 7, metadata: { name: 'From meta', path: '/w' } }] }),
+  });
+  try {
+    const client = await CtenoSession.open({ socketPath: host.path });
+    assert.deepEqual(await client.listSessions(), [{ id: 's2', title: 'From meta', workdir: '/w', active: false, updatedAt: 7 }]);
+    client.dispose();
+  } finally { host.close(); }
+});
+
+test('create with a spec fails clearly on a daemon without sdk-session-spec-v1', async () => {
+  let created = false;
+  const host = await startFakeHost({
+    '__rpc.hello': () => ({ capabilities: ['hooks-subscribe-v1'] }),
+    'create-thread': () => { created = true; return { success: true, sessionId: 's1' }; },
+  });
+  const session = await CtenoSession.open({ socketPath: host.path });
+  try {
+    await assert.rejects(session.create({ spec: { systemPrompt: 'x' } }), error =>
+      error.code === 'PROTOCOL' && /sdk-session-spec-v1/.test(error.message) && /2\.10\.10/.test(error.message));
+    assert.equal(created, false, 'no session may be created when the spec would be ignored');
+  } finally { session.dispose(); host.close(); }
+});
+
+test('create sends a relative cwd as an absolute path from the caller', async () => {
+  let seen;
+  const host = await startFakeHost({ 'create-thread': params => { seen = params; return { success: true, sessionId: 's1' }; } });
+  const session = await CtenoSession.open({ socketPath: host.path });
+  try {
+    await session.create({ cwd: '.' });
+    assert.equal(seen.workdir, process.cwd());
+    await session.create({ cwd: '/abs/dir' });
+    assert.equal(seen.workdir, '/abs/dir');
+  } finally { session.dispose(); host.close(); }
+});
+
 test('call rejects an already-scoped method name', async () => {
   const host = await startFakeHost({});
   try {
@@ -424,6 +462,7 @@ test('create sends every daemon param and the normalized agent spec; serves clie
 test('create surfaces an invalid spec as REMOTE and abort targets the session scope', async () => {
   let aborted = false;
   const host = await startFakeHost({
+    '__rpc.hello': () => ({ capabilities: ['hooks-subscribe-v1', 'sdk-session-spec-v1'] }),
     'create-thread': () => ({ success: false, errorKind: 'invalid_sdk_spec', error: "unknown sdk spec field 'sytemPrompt'" }),
     's1:abort': () => { aborted = true; return { success: true }; },
   });

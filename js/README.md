@@ -1,20 +1,35 @@
 # @cteno/sdk
 
-Node.js client for a **locally running Cteno daemon**. Create a session, send a
-prompt, stream the answer — or build your own agent on Cteno with your own system
-prompt and tools that run in your process.
+Run Cteno agents from Node.js. Create a session, send a prompt, stream the answer —
+or build your own agent on Cteno with your own system prompt and tools that run in
+your process.
 
-Requires Node ≥ 20 and a running Cteno daemon (the Cteno desktop app runs one).
-The SDK never starts a daemon for you.
+> **The npm package is coming soon** (with Cteno 2.10.12). Until then, build from
+> source and point the SDK at a daemon: see the repository README, "Use from source".
+
+Once published, `npm install @cteno/sdk` also installs the Cteno daemon for your platform
+(`@cteno/sdk-<os>-<arch>`, an optional dependency). `CtenoSession.open()` starts it in
+local mode on first use: no desktop app, no account, your own model key. Requires
+Node ≥ 20.
 
 ## Install
 
-Not on npm yet; build a tarball from this repository:
-
 ```bash
-cd js && npm install && npm run build && npm pack
-npm install /path/to/cteno-sdk-0.1.0.tgz      # in your project
+# coming soon — not published yet
+npm install @cteno/sdk
 ```
+
+Register a model once (BYOK; stored in the SDK daemon's own data directory):
+
+```ts
+import { CtenoSession } from '@cteno/sdk/core';
+
+const cteno = await CtenoSession.open();
+await cteno.configureModel({ baseUrl: 'https://api.openai.com/v1', model: 'gpt-4.1-mini', apiKey: process.env.OPENAI_API_KEY! });
+```
+
+See the [repository README](../README.md) for platforms, permissions, the daemon's
+lifecycle and troubleshooting.
 
 ## One-shot query
 
@@ -22,7 +37,9 @@ npm install /path/to/cteno-sdk-0.1.0.tgz      # in your project
 import { query } from '@cteno/sdk/core';
 
 for await (const message of query({ prompt: 'Summarize the files in this folder', cwd: './src' })) {
-  if (message.type === 'assistant') console.log(message.text);
+  if (message.type === 'assistant' && (message.kind === undefined || message.kind === 'message')) {
+    console.log(message.text);   // answer text only; structured frames carry `kind`
+  }
 }
 ```
 
@@ -60,10 +77,18 @@ await session.close(id);
 session.dispose();
 ```
 
-`permissionMode`: `default` asks for anything not pre-approved (right when a human
-watches the Cteno app), `acceptEdits`, `bypassPermissions` (the usual choice for
-unattended automation — only when you control the prompt and working directory),
-`plan` (no mutations).
+Tools that are not read-only need approval. Without one the SDK denies them at once
+(the model is told why), so nothing hangs. Decide per call with `canUseTool`
+on `send()` / `run()` / `query()`:
+
+```ts
+await session.run({ sessionId: id, prompt: 'Run the tests',
+  canUseTool: req => req.toolName === 'Bash' ? { allow: true } : { allow: false, reason: 'no' } });
+```
+
+or set `permissionMode` on `create()`: `acceptEdits` (file edits allowed),
+`plan` (no mutations), `bypassPermissions` (everything runs — only when you control
+the prompt and working directory).
 
 ## Your own agent: prompt, client tools, structured output
 
@@ -129,11 +154,17 @@ Methods in `STABLE_METHODS` (`@cteno/sdk/method-tiers`) follow semver. Others ar
 daemon internals: `call()` still works but warns once; pass `{ quiet: true }` when the
 dependency is deliberate.
 
-## Connection and authentication
+## The daemon and the connection
 
-The SDK talks to the daemon's owner socket — mode `0600` Unix socket or named pipe.
-Your OS user is the credential; there are no tokens. Discovery scans for
-daemon-published sockets; override with `CTENO_HOST_ROOT` or `socketPath`.
+`CtenoSession.open()` attaches to the SDK's own daemon (one per user and instance
+root, default `~/Library/Application Support/cteno-sdk`, `~/.local/share/cteno-sdk`,
+`%LOCALAPPDATA%\cteno-sdk`; override with `CTENO_SDK_HOME` or `open({ daemon: { home } })`)
+and starts it if needed. It is separate from a Cteno desktop app on the same machine
+and never connects to it unless you pass `socketPath`. The daemon keeps running after
+your process exits; `stopDaemon()` from `@cteno/sdk/daemon` stops it.
+
+The connection is the daemon's owner socket — a mode `0600` Unix socket, or a
+per-root named pipe on Windows. Your OS user is the credential; there are no tokens.
 
 ## Entry points
 
@@ -142,10 +173,12 @@ daemon-published sockets; override with `CTENO_HOST_ROOT` or `socketPath`.
 | `@cteno/sdk/core` | `query`, `CtenoSession`, agent spec, hooks |
 | `@cteno/sdk` | `Transport` interface, `SdkError`, minimal `CtenoClient` |
 | `@cteno/sdk/node` | raw Unix-socket / named-pipe transport (explicit path) |
-| `@cteno/sdk/discover` | socket discovery on its own |
+| `@cteno/sdk/daemon` | `ensureDaemon`, `stopDaemon`, `instanceLayout`: the bundled daemon |
+| `@cteno/sdk/discover` | find a Cteno app's daemon socket (never used by `open()`) |
 | `@cteno/sdk/socketio` | adapter for an injected, already-authenticated Socket.IO client |
 | `@cteno/sdk/method-tiers` | stable/internal method classification |
 
 ## License
 
-MIT
+MIT. The daemon binaries in `@cteno/sdk-<platform>` are not MIT; see the
+`LICENSE.daemon` file inside that package.

@@ -1,8 +1,8 @@
 """Your own agent from Python: replaced prompt + a client tool + one turn.
 
-    python examples/python/query.py [model-profile-id]
+    python query.py [model-profile-id]
 
-Requires a running Cteno daemon (>= 2.10.10 for AgentSpec) and `pip install ./python`.
+Requires a running Cteno daemon (>= 2.10.10 for AgentSpec). See ../../README.md for setup.
 """
 import asyncio
 import sys

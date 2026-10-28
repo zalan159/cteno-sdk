@@ -1,7 +1,7 @@
 {
   "name": "@cteno/sdk",
-  "version": "0.1.0",
-  "description": "Node.js client for a locally running Cteno daemon: run agent sessions, stream results, serve client tools",
+  "version": "2.10.12",
+  "description": "Run Cteno agents from Node.js. Bundles a local Cteno daemon per platform; no desktop app or account needed.",
   "type": "module",
   "license": "MIT",
   "author": "Cteno contributors",
@@ -14,7 +14,14 @@
   "bugs": {
     "url": "https://github.com/zalan159/cteno-sdk/issues"
   },
-  "keywords": ["cteno", "agent", "sdk", "llm", "ai-agent", "automation"],
+  "keywords": [
+    "cteno",
+    "agent",
+    "sdk",
+    "llm",
+    "ai-agent",
+    "automation"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -37,6 +44,10 @@
       "types": "./dist/discover.d.ts",
       "node": "./dist/discover.js"
     },
+    "./daemon": {
+      "types": "./dist/daemon.d.ts",
+      "node": "./dist/daemon.js"
+    },
     "./method-tiers": {
       "types": "./dist/method-tiers.d.ts",
       "default": "./dist/method-tiers.js"
@@ -53,7 +64,8 @@
   },
   "cteno": {
     "minDaemonVersion": "2.10.9",
-    "agentSpecMinDaemonVersion": "2.10.10"
+    "agentSpecMinDaemonVersion": "2.10.10",
+    "platforms": ["darwin-arm64", "darwin-x64", "linux-x64", "win32-x64"]
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",

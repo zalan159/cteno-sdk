@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cteno-sdk"
-version = "0.1.0"
-description = "Python client for a locally running Cteno daemon (same owner-socket protocol as @cteno/sdk)"
+version = "2.10.12"
+description = "Run Cteno agents from Python. Platform wheels bundle a local Cteno daemon; no desktop app or account needed."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

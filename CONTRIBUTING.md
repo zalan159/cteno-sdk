@@ -29,7 +29,7 @@ python -m unittest discover -s tests
 ```
 
 Tests never talk to a real Cteno daemon or a model. To try the examples against your
-own running Cteno app, build the package and run `node examples/node/basic-query.mjs`.
+own running Cteno app, build `js/`, then `cd examples/node && npm install && node basic-query.mjs`.
 
 ## Reporting bugs
 

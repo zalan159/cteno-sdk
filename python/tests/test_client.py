@@ -154,8 +154,10 @@ class SessionTest(unittest.TestCase):
 
     def test_invalid_spec_surfaces_remote_error(self):
         async def scenario():
-            host = await FakeHost({"create-thread": lambda p, s: {
-                "success": False, "errorKind": "invalid_sdk_spec", "error": "unknown sdk spec field 'x'"}}).start()
+            host = await FakeHost({
+                "__rpc.hello": lambda p, s: {"capabilities": ["hooks-subscribe-v1", "sdk-session-spec-v1"]},
+                "create-thread": lambda p, s: {
+                    "success": False, "errorKind": "invalid_sdk_spec", "error": "unknown sdk spec field 'x'"}}).start()
             try:
                 client = await CtenoSession.open(host.path)
                 with self.assertRaises(SdkError) as raised:
@@ -166,6 +168,65 @@ class SessionTest(unittest.TestCase):
             finally:
                 await host.close()
         run(scenario())
+
+    def test_spec_on_old_daemon_fails_before_creating(self):
+        async def scenario():
+            created = []
+            host = await FakeHost({
+                "__rpc.hello": lambda p, s: {"capabilities": ["hooks-subscribe-v1"]},
+                "create-thread": lambda p, s: created.append(p) or {"success": True, "sessionId": "s1"},
+            }).start()
+            try:
+                client = await CtenoSession.open(host.path)
+                with self.assertRaises(SdkError) as raised:
+                    await client.create(spec=AgentSpec(system_prompt="x"))
+                self.assertEqual(raised.exception.code, "PROTOCOL")
+                self.assertIn("sdk-session-spec-v1", str(raised.exception))
+                self.assertIn("2.10.10", str(raised.exception))
+                self.assertEqual(created, [])
+                client.close()
+            finally:
+                await host.close()
+        run(scenario())
+
+    def test_relative_cwd_is_sent_absolute(self):
+        async def scenario():
+            seen = []
+            host = await FakeHost({"create-thread": lambda p, s: seen.append(p) or {"success": True, "sessionId": "s1"}}).start()
+            try:
+                client = await CtenoSession.open(host.path)
+                await client.create(cwd=".")
+                self.assertEqual(seen[-1]["workdir"], os.getcwd())
+                client.close()
+            finally:
+                await host.close()
+        run(scenario())
+
+
+class DiscoveryTest(unittest.TestCase):
+    """The daemon publishes host[.<tag>].sock; headless serve uses host.host.sock."""
+
+    def test_finds_desktop_dev_and_headless_sockets_only(self):
+        import socket
+        from cteno_sdk.client import discover_owner_sockets
+        root = tempfile.mkdtemp(prefix="cteno-py-discover-")
+        socks = []
+        try:
+            for name in ("host.sock", "host.dev.sock", "host.host.sock", "host.sock.public"):
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.bind(os.path.join(root, name))
+                socks.append(s)
+            with open(os.path.join(root, "host.stale.sock"), "w") as f:
+                f.write("not a socket")
+            os.environ["CTENO_HOST_ROOT"] = root
+            names = [p.name for p in discover_owner_sockets()]
+            self.assertEqual(names, ["host.dev.sock", "host.host.sock", "host.sock"])
+        finally:
+            os.environ.pop("CTENO_HOST_ROOT", None)
+            for s in socks:
+                s.close()
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

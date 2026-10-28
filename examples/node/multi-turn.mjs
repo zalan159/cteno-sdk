@@ -1,5 +1,5 @@
 // Several turns on one session, then read its history back.
-//   node examples/node/multi-turn.mjs
+//   node multi-turn.mjs
 import { CtenoSession } from '@cteno/sdk/core';
 
 const session = await CtenoSession.open();

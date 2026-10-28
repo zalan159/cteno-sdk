@@ -63,6 +63,40 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: python -m pip install build && python -m build
 
+  pack:
+    name: Platform packaging (fake payload)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pack every target from a stand-in payload and inspect the result
+        run: |
+          set -e
+          P="$RUNNER_TEMP/payload"
+          for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
+            rm -rf "$P" && mkdir -p "$P/bin" "$P/tools" "$P/skills" "$P/agents"
+            exe=""; [ "$t" = win32-x64 ] && exe=.exe
+            printf 'stand-in' > "$P/bin/cteno-host-cli$exe"
+            printf "stand-in license\n" > "$P/LICENSE.daemon"
+            printf '{"schemaVersion":1,"sku":"sdk-core","version":"0.0.0-ci","target":"%s","binaries":["cteno-host-cli%s"]}\n' "$t" "$exe" > "$P/manifest.json"
+            node scripts/pack-platform.mjs --payload "$P" --target "$t" --out "$RUNNER_TEMP/out" --wheel
+            node -e "const p=require('$RUNNER_TEMP/out/npm/sdk-$t/package.json'); if (!p.os.length || !p.cpu.length || p.cteno.daemonVersion!=='0.0.0-ci') process.exit(1)"
+            (cd "$RUNNER_TEMP/out/npm/sdk-$t" && npm pack --dry-run 2>&1 | grep -q "bin/cteno-host-cli$exe")
+          done
+          python3 - "$RUNNER_TEMP/out/wheel" <<'PY'
+          import sys, zipfile, pathlib
+          wheels = sorted(pathlib.Path(sys.argv[1]).glob('*.whl'))
+          assert len(wheels) == 5, wheels
+          for w in wheels:
+              names = zipfile.ZipFile(w).namelist()
+              assert any(n.startswith('cteno_sdk/_bin/bin/cteno-host-cli') for n in names), w
+              assert 'cteno_sdk/client.py' in names and any(n.endswith('.dist-info/RECORD') for n in names), w
+          print('wheels ok:', [w.name for w in wheels])
+          PY
+          cp js/package.json "$RUNNER_TEMP/pkg.json" && node scripts/pin-platform-deps.mjs "$RUNNER_TEMP/pkg.json"
+
   gitleaks:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest

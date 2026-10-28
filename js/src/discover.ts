@@ -15,6 +15,11 @@
  * daemon's own published artifact, which is the durable fact.
  *
  * `CTENO_HOST_ROOT` always wins, matching the daemon's own precedence.
+ *
+ * NOTE: `CtenoSession.open()` does NOT use this. It attaches to the SDK's own
+ * bundled daemon and never to an installed Cteno app. This module stays for
+ * tooling that deliberately wants to list the daemons on a machine (for
+ * example to pick a `socketPath` explicitly).
  */
 import { readdirSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
@@ -26,7 +31,7 @@ export interface OwnerEndpoint {
   path: string;
   /** Host root this endpoint was found under, for diagnostics. */
   hostRoot: string;
-  /** `dev` sockets are `host.dev.sock`; release is `host.sock`. */
+  /** `dev` for `host.dev[-<edition>].sock`; everything else (`host.sock`, headless `host.host.sock`, …) is `release`. */
   kind: 'dev' | 'release';
 }
 
@@ -47,9 +52,23 @@ function appDataParents(): string[] {
   }
 }
 
+/**
+ * The daemon names its owner socket `host.sock` or `host.<tag>.sock`, where the
+ * tag is its environment plus optional edition suffix: `dev` (development),
+ * `host` (headless `cteno-host-cli serve`), `dev-<edition>`, `<edition>`.
+ * `host.sock.public` is a different, authenticated listener and never matches.
+ */
+const OWNER_SOCKET = /^host(?:\.([A-Za-z0-9_-]+))?\.sock$/;
+
 function socketsUnder(hostRoot: string): OwnerEndpoint[] {
+  let names: string[];
+  try { names = readdirSync(hostRoot).sort(); } catch { return []; }
   const found: OwnerEndpoint[] = [];
-  for (const [name, kind] of [['host.dev.sock', 'dev'], ['host.sock', 'release']] as const) {
+  for (const name of names) {
+    const match = OWNER_SOCKET.exec(name);
+    if (!match) continue;
+    const tag = match[1] ?? '';
+    const kind: OwnerEndpoint['kind'] = tag === 'dev' || tag.startsWith('dev-') ? 'dev' : 'release';
     const path = join(hostRoot, name);
     try {
       // A dead daemon can leave the inode behind, so presence is a candidate,

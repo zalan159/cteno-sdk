@@ -1,6 +1,6 @@
 // Your own agent: replaced system prompt, a tool that runs in this process,
 // and a structured result. Needs daemon >= 2.10.10 (capability sdk-session-spec-v1).
-//   node examples/node/client-tools.mjs [model-profile-id]
+//   node client-tools.mjs [model-profile-id]
 import { CtenoSession } from '@cteno/sdk/core';
 
 const PLACES = [
