@@ -50,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
         python: ['3.9', '3.12']
     defaults:
       run:
@@ -76,14 +76,20 @@ jobs:
           set -e
           P="$RUNNER_TEMP/payload"
           for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
-            rm -rf "$P" && mkdir -p "$P/bin" "$P/tools" "$P/skills" "$P/agents"
+            rm -rf "$P" && mkdir -p "$P/bin" "$P/tools" "$P/skills" "$P/agents" "$P/plugins"
             exe=""; [ "$t" = win32-x64 ] && exe=.exe
-            printf 'stand-in' > "$P/bin/cteno-host-cli$exe"
+            for b in cteno-host-cli cteno-wiki secret-exec rg; do printf 'stand-in' > "$P/bin/$b$exe"; done
+            for d in tools skills agents plugins; do printf 'stand-in' > "$P/$d/fixture"; done
             printf "stand-in license\n" > "$P/LICENSE.daemon"
             printf '{"schemaVersion":1,"sku":"sdk-core","version":"0.0.0-ci","target":"%s","binaries":["cteno-host-cli%s"]}\n' "$t" "$exe" > "$P/manifest.json"
             node scripts/pack-platform.mjs --payload "$P" --target "$t" --out "$RUNNER_TEMP/out" --wheel
             node -e "const p=require('$RUNNER_TEMP/out/npm/sdk-$t/package.json'); if (!p.os.length || !p.cpu.length || p.cteno.daemonVersion!=='0.0.0-ci') process.exit(1)"
             (cd "$RUNNER_TEMP/out/npm/sdk-$t" && npm pack --dry-run 2>&1 | grep -q "bin/cteno-host-cli$exe")
+            mv "$P/bin/rg$exe" "$P/rg-held"
+            if node scripts/pack-platform.mjs --payload "$P" --target "$t" --out "$RUNNER_TEMP/negative"; then exit 1; fi
+            mv "$P/rg-held" "$P/bin/rg$exe"
+            rm -rf "$P/plugins"
+            if node scripts/pack-platform.mjs --payload "$P" --target "$t" --out "$RUNNER_TEMP/negative" --wheel; then exit 1; fi
           done
           python3 - "$RUNNER_TEMP/out/wheel" <<'PY'
           import sys, zipfile, pathlib
