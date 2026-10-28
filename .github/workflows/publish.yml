@@ -98,6 +98,7 @@ jobs:
           ls -la
       - name: Pack npm platform packages and wheels
         run: |
+          mkdir -p "$RUNNER_TEMP/out/tgz"
           for t in $(node -p "require('./js/package.json').cteno.platforms.join(' ')"); do
             node scripts/pack-platform.mjs --target "$t" --out "$RUNNER_TEMP/out" --wheel \
               --payload "$RUNNER_TEMP/bundles/cteno-sdk-daemon-${{ inputs.daemon }}-$t.tar.gz"
