@@ -19,7 +19,7 @@
  * any machine can produce every platform's wheel without a compiler.
  */
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, openSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
@@ -99,8 +99,16 @@ export function openPayload(payload) {
   if (statSync(payload).isDirectory()) return payload;
   const dir = join(tmpdir(), `cteno-sdk-payload-${process.pid}-${Date.now()}`);
   mkdirSync(dir, { recursive: true });
-  execFileSync('tar', ['-xzf', payload, '-C', dir], { stdio: 'inherit' });
-  return dir;
+  const fd = openSync(payload, 'r');
+  try {
+    execFileSync('tar', ['-xzf', '-', '-C', dir], { stdio: [fd, 'inherit', 'inherit'] });
+    return dir;
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Copy a staged payload (bin/, resources, manifest, license) into `dir`. */
