@@ -7,6 +7,15 @@ the version of the Cteno daemon it bundles; see the compatibility table in the R
 
 ## [Unreleased]
 
+## [2.10.15] - 2026-10-30
+
+Bundles the Cteno 2.10.15 daemon. No SDK API changes.
+
+### Changed
+- The bundled daemon catches up reconnecting clients by transcript cursor, supports starting a
+  fresh Jelly conversation (`conversation.start-fresh.v1`), and drives the built-in browser
+  through the engine's native input path.
+
 ## [2.10.14] - 2026-10-29
 
 First release with one version for the SDK and Cteno: 2.10.14 bundles the Cteno 2.10.14

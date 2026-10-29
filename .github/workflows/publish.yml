@@ -18,8 +18,10 @@ name: Publish
 # Prerequisites (one-time):
 #   - npm:  repository secret NPM_TOKEN (publish rights on @cteno). The npm job
 #           fails fast with a clear message until it exists.
-#   - PyPI: trusted publishing bound to this repository, workflow `publish.yml`,
-#           environment `pypi`. Do not rename either.
+#   - PyPI: either trusted publishing bound to this repository, workflow
+#           `publish.yml`, environment `pypi` (do not rename either), or a
+#           repository secret PYPI_API_TOKEN scoped to the cteno-sdk project
+#           (preferred when set; `uv publish` reads it as UV_PUBLISH_TOKEN).
 
 on:
   workflow_dispatch:
@@ -175,8 +177,18 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          for f in pkgs/cteno-sdk-*-*.tgz; do npm publish "$f" --provenance --access public; done
-          npm publish pkgs/cteno-sdk-${{ needs.verify.outputs.version }}.tgz --provenance --access public
+          # Tarball paths MUST start with ./ — a bare `pkgs/x.tgz` is read by npm as
+          # the GitHub shorthand `owner/repo` and fails with `git ls-remote
+          # ssh://git@github.com/pkgs/x.tgz.git` (2.10.14 run 40912318927).
+          # Already-published versions are skipped so a partial run can be resumed.
+          v="${{ needs.verify.outputs.version }}"
+          for f in ./pkgs/cteno-sdk-*-*.tgz ./pkgs/cteno-sdk-"$v".tgz; do
+            name=$(tar -xOzf "$f" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0)).name")
+            if npm view "$name@$v" version --registry https://registry.npmjs.org >/dev/null 2>&1; then
+              echo "skip $name@$v (already on npm)"; continue
+            fi
+            npm publish "$f" --provenance --access public --registry https://registry.npmjs.org
+          done
 
   pypi:
     name: PyPI cteno-sdk
@@ -195,6 +207,19 @@ jobs:
           name: packages
           path: pkgs
       - run: mkdir dist && cp pkgs/*.whl pkgs/*.tar.gz dist/ && ls -la dist
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/
+      # API token (repository secret PYPI_API_TOKEN, scoped to cteno-sdk) when it
+      # exists; otherwise trusted publishing (OIDC) bound to this repo /
+      # publish.yml / environment `pypi`. 2.10.14 run 40912318927 failed with
+      # `invalid-pending-publisher`: no trusted publisher was registered.
+      # Files already on PyPI are skipped so a partial run can be resumed.
+      - uses: astral-sh/setup-uv@v6
+      - name: Publish to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$UV_PUBLISH_TOKEN" ]; then
+            uv publish --check-url https://pypi.org/simple/ dist/*
+          else
+            unset UV_PUBLISH_TOKEN
+            uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*
+          fi

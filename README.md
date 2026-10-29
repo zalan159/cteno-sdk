@@ -386,6 +386,7 @@ credentials for it.
 
 | SDK | Bundled daemon | Platforms with a bundled daemon |
 |---|---|---|
+| 2.10.15 | Cteno 2.10.15 | macOS arm64 / x64, Linux x64 (glibc ≥ 2.34), Windows x64 |
 | 2.10.14 | Cteno 2.10.14 | macOS arm64 / x64, Linux x64 (glibc ≥ 2.34), Windows x64 |
 | 2.10.13 | Cteno 2.10.12 | macOS arm64 / x64, Linux x64 (glibc ≥ 2.34), Windows x64 |
 | 2.10.12 (not published) | Cteno 2.10.12 | – |
