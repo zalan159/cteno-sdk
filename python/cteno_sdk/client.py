@@ -21,7 +21,7 @@ import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 AGENT_SPEC_CAPABILITY = "sdk-session-spec-v1"
 HOOKS_SUBSCRIBE_CAPABILITY = "hooks-subscribe-v1"
@@ -365,6 +365,17 @@ def _obj(value: Any) -> bool:
     return isinstance(value, dict)
 
 
+def _error_frame_of(message: Dict[str, Any]) -> Optional[Tuple[str, Optional[str]]]:
+    """(message, errorCode) of an ACP ``error`` frame, else None."""
+    if message.get("type") != "assistant" or message.get("kind") != "error":
+        return None
+    data = message.get("data")
+    inner = data.get("content", {}).get("data") if _obj(data) and _obj(data.get("content")) else None
+    text = inner.get("message") if _obj(inner) and isinstance(inner.get("message"), str) and inner.get("message") else message.get("text", "")
+    code = inner.get("errorCode") if _obj(inner) and isinstance(inner.get("errorCode"), str) else None
+    return text, code
+
+
 def _decode_message(entry: Dict[str, Any], session_id: str) -> Optional[Dict[str, Any]]:
     role, raw = entry.get("role"), entry.get("text") if isinstance(entry.get("text"), str) else ""
     data: Any = None
@@ -450,7 +461,13 @@ class CtenoSession:
                               id: str = "sdk-default", name: Optional[str] = None,
                               supports_vision: bool = False, max_tokens: int = 8192,
                               make_default: bool = True) -> str:
-        """Add a BYOK model profile (stored in the SDK daemon's own data dir) and make it the default."""
+        """Add a BYOK model profile (stored in the SDK daemon's own data dir) and make it the default.
+
+        ``base_url`` is the API base including its version (e.g. ``https://api.openai.com/v1``,
+        ``https://api.deepseek.com/anthropic/v1``); the client appends only the resource path.
+        A base missing a version segment or repeating one raises ``SdkError("REMOTE")`` naming
+        the full URL it would have requested.
+        """
         endpoint = {"base_url": base_url, "model": model, "api_key": api_key, "temperature": 0.7,
                     "max_tokens": max_tokens, "context_window_tokens": None}
         saved = await self.call("save-profile", {"profile": {
@@ -721,10 +738,21 @@ class CtenoSession:
             return m["type"] == "assistant" and m.get("kind") in (None, "message")
 
         answers = [m for m in messages if is_answer(m)]
+        turn_frames = list(messages)
         if not answers and ok:
             history = await self.history(session_id, limit=20)
             users = [i for i, m in enumerate(history) if m["type"] == "user"]
-            answers = [m for m in history[(users[-1] + 1 if users else 0):] if is_answer(m)]
+            tail = history[(users[-1] + 1 if users else 0):]
+            turn_frames += tail
+            answers = [m for m in tail if is_answer(m)]
+        if ok and not answers:
+            # Fallback for daemons without `send.wait.turn-result.v1`, which
+            # reply success once the turn merely ended: an error frame with no
+            # answer is a failed turn, never ok.
+            failures = [f for f in (_error_frame_of(m) for m in turn_frames) if f]
+            if failures:
+                ok = False
+                error, error_kind = failures[-1]
         text = answers[-1]["text"] if answers else ""
         try:
             output = json.loads(text)

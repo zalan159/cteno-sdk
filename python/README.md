@@ -3,11 +3,7 @@
 Run Cteno agents from Python — same protocol and shape as the Node package
 `@cteno/sdk`. Standard library only, Python ≥ 3.9, asyncio.
 
-> **The PyPI package is coming soon** (with Cteno 2.10.12). Until then, install from
-> source with `pip install ./python` and point the SDK at a daemon: see the repository
-> README, "Use from source".
-
-The platform wheels (planned: macOS arm64/x64, Linux x64 with glibc ≥ 2.34, Windows x64;
+The platform wheels (macOS arm64/x64, Linux x64 with glibc ≥ 2.34, Windows x64;
 Linux arm64 is not supported yet)
 include the Cteno daemon. `CtenoSession.open()` starts it in local mode on first use:
 no desktop app, no account, your own model key.
@@ -15,7 +11,6 @@ no desktop app, no account, your own model key.
 ## Install
 
 ```bash
-# coming soon — not published yet
 pip install cteno-sdk
 ```
 
@@ -40,6 +35,13 @@ async def main():
 
 asyncio.run(main())
 ```
+
+`base_url` is used as given: include the API version (`https://api.openai.com/v1`,
+`https://api.deepseek.com/anthropic/v1`, `https://generativelanguage.googleapis.com/v1beta`);
+the SDK appends only the resource path. A base that is missing or repeats a version
+segment makes `configure_model()` raise `SdkError` naming the full URL it would have
+requested. `result.ok` is `False` when the turn failed (model 404/401/429, quota,
+timeout); `result.error` is the original error text and `result.error_kind` its class.
 
 Tools that are not read-only are denied at once unless you approve them:
 

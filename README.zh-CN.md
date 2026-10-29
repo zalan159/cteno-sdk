@@ -2,7 +2,7 @@
 
 **用你自己的 Node.js 或 Python 代码运行 Cteno Agent。不用装桌面 App，也不用注册账号。**
 
-包发布后，`npm install @cteno/sdk` 或 `pip install cteno-sdk`（即将上线）会顺带装上一个适配你平台的本地 Cteno daemon。
+`npm install @cteno/sdk` 或 `pip install cteno-sdk` 会顺带装上一个适配你平台的本地 Cteno daemon。
 第一次调用 `CtenoSession.open()` 时，它以**本地模式**启动：不登录、没有 Cteno 账号，模型用你自己的 key（BYOK）。
 你的代码可以创建 Agent 会话、流式读取输出、在你自己的进程里执行你定义的工具，并取回结果。
 
@@ -16,14 +16,12 @@
 | `@cteno/sdk` | Node.js ≥ 20（ESM，自带 TypeScript 类型） | [`js/`](js/) |
 | `cteno-sdk`（`import cteno_sdk`） | Python ≥ 3.9，只依赖标准库 | [`python/`](python/) |
 
-> **当前状态：npm / PyPI 包即将发布**（随 Cteno 2.10.12 一起发布）。
-> 在那之前请从源码使用，见[从源码使用](#从源码使用当前可用)。下文的 `npm install` / `pip install`
-> 都标了「即将上线」，现在还装不上。
+> **当前状态：**npm 与 PyPI 已发布 2.10.14（内置 Cteno 2.10.14）。2.10.13 是唯一一次单独发布的 SDK 版本，内置的是 2.10.12 的 daemon；从 2.10.14 起 SDK 版本号与 Cteno 一致。
 
 ## 前置条件
 
 - Node.js ≥ 20，或 Python ≥ 3.9。
-- 2.10.12 计划支持的平台：macOS（Apple 芯片；Intel 需 ≥ 10.15）、Linux x64（glibc ≥ 2.34，即 Ubuntu 22.04+、Debian 12+、RHEL 9+）、Windows x64。暂不支持 Linux arm64。
+- 支持的平台：macOS（Apple 芯片；Intel 需 ≥ 10.15）、Linux x64（glibc ≥ 2.34，即 Ubuntu 22.04+、Debian 12+、RHEL 9+）、Windows x64。暂不支持 Linux arm64。
 - **一个模型服务的 API key**，接口兼容 OpenAI、Anthropic 或 Gemini 均可（OpenAI、DeepSeek、Moonshot、OpenRouter、本地 Ollama/vLLM 等）。
   用 `configureModel()` 登记一次即可，见下面的上手示例。
 
@@ -44,10 +42,9 @@ cd js && npm install && npm run build && cd ..   # Node：先构建一次，再�
 pip install ./python                             # Python：安装源码包
 ```
 
-### 从 npm / PyPI 安装（即将上线，随 Cteno 2.10.12 发布）
+### 从 npm / PyPI 安装
 
 ```bash
-# 即将上线，现在还没有发布
 npm install @cteno/sdk
 pip install cteno-sdk
 ```
@@ -66,7 +63,7 @@ import { CtenoSession, query } from '@cteno/sdk/core';
 
 const cteno = await CtenoSession.open();            // 第一次调用时启动自带的 daemon
 await cteno.configureModel({
-  baseUrl: 'https://api.openai.com/v1',             // 任意 OpenAI 兼容接口
+  baseUrl: 'https://api.openai.com/v1',             // 含版本号的 API 根地址，原样使用
   model: 'gpt-4.1-mini',
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -104,6 +101,20 @@ asyncio.run(main())
 
 一台机器上第一次 `open()` 要一两秒，用来启动 daemon、初始化数据库；之后的调用直接连上已在运行的 daemon。
 Anthropic 或 Gemini 风格的接口，传 `apiFormat: 'anthropic'` / `'gemini'`（Python 是 `api_format=`）。
+
+**`baseUrl` 原样使用，SDK 不会替你拼任何版本号。** 它只在后面追加接口路径：`apiFormat: 'openai'` 追加 `/responses`（OpenAI Responses API），`'anthropic'` 追加 `/messages`，`'gemini'` 追加 `/models/<model>:streamGenerateContent`。请按厂商文档把版本段写进 `baseUrl`：
+
+| 厂商 | `apiFormat` | `baseUrl` |
+|---|---|---|
+| OpenAI | `openai` | `https://api.openai.com/v1` |
+| DeepSeek | `openai` | `https://api.deepseek.com/v1` |
+| DeepSeek（Anthropic 兼容） | `anthropic` | `https://api.deepseek.com/anthropic/v1` |
+| Anthropic | `anthropic` | `https://api.anthropic.com/v1` |
+| Google Gemini | `gemini` | `https://generativelanguage.googleapis.com/v1beta` |
+
+**配置错误在 `configureModel()` 时就报错，不会等到第一轮才 404。** `baseUrl` 缺版本段、版本段重复（`…/v1/v1`）或带了接口路径（`…/v1/responses`）时，`configureModel()` 抛 `SdkError('REMOTE')`，错误信息里写明实际将请求的完整 URL。
+
+**`ok` 反映这一轮的真实结果。** 模型调用失败（404、401、限流、额度）或回合超时时，`result.ok` 为 `false`，`error` 是厂商返回的错误原文（含实际请求的 URL，例如 `OpenAI API error (404 Not Found) POST https://…/v1/responses: (empty body)`），`errorKind` 是错误类别（`E_EXECUTOR`、`E_AUTH`、`E_RATE_LIMIT`、`E_TIMEOUT` 等）。`ok: true` 表示这一轮跑完并给出了回答。
 
 流里的 `assistant` 帧除了正文，还有 thinking、工具调用等结构化帧（`kind` 有值）。只打印 `kind` 为空或 `'message'` 的帧，就只看到正文。
 
@@ -189,8 +200,10 @@ pip install ./python && python examples/python/quickstart.py
 | 从源码使用时报 `The platform package @cteno/sdk-<platform> is not installed` | npm 包发布之前，源码检出没有自带 daemon。请传桌面版的 `socketPath`，或设置 `CTENO_SDK_DAEMON_PATH`（见[从源码使用](#从源码使用当前可用)）。 |
 | `No bundled Cteno daemon for <os>-<arch>` | 你的平台没有预编译的 daemon（见[前置条件](#前置条件)）。把 `CTENO_SDK_DAEMON_PATH` 指向你自己编译的 `cteno-host-cli`，或用 `socketPath` 连你自己运行的 daemon。 |
 | Python：`This cteno-sdk install has no bundled daemon` | pip 装的是 sdist（你的平台没有 wheel，或用了 `--no-binary`）。在支持的平台上用 `pip install --only-binary=:all: cteno-sdk`，或设置 `CTENO_SDK_DAEMON_PATH`。 |
-| `The bundled Cteno daemon exited during startup` | 报错里附有实例目录下 `logs/daemon.log` 的末尾。Linux 上出现 `GLIBC_2.34 not found`，说明发行版太老。 |
-| `result.ok` 为 false，报模型、鉴权或额度错误 | 模型 profile 跑不起来：检查 `baseUrl`、`model`、`apiKey`、`apiFormat`，再调一次 `configureModel()`（相同 `id` 会覆盖）。`listProfiles()` 能看到已配置的。 |
+| `The bundled Cteno daemon exited during startup` / `failed to start: CTENO_DAEMON_FATAL …` | 报错开头是 daemon 自己打印的致命错误行和本次启动的错误行，后面附 `logs/daemon.log` 的末尾。Linux 上出现 `GLIBC_2.34 not found`，说明发行版太老。 |
+| `daemon home too long: socket path … is N bytes, max M`（`CONFIG`） | daemon 的 Unix socket 在 `<home>/run/host.host.sock`，系统限制路径长度（macOS 103 字节、Linux 107 字节）。换一个更短的 `home` / `CTENO_SDK_HOME`。这个错误在启动任何进程之前就会报出。 |
+| `configureModel()` 拒绝 `baseUrl` | 错误信息里有实际将请求的 URL。按上面的表格填含版本号的 API 根地址。 |
+| `result.ok` 为 false，报模型、鉴权或额度错误 | `error` 是厂商的原始回复，并写明实际请求的 URL。检查 `baseUrl`、`model`、`apiKey`、`apiFormat`，再调一次 `configureModel()`（相同 `id` 会覆盖）。`listProfiles()` 能看到已配置的。 |
 | 工具调用被拒绝："No approver is attached …" | 非只读工具默认就是这样。传 `canUseTool`，或选一个 `permissionMode`（见[权限](#权限哪些操作不用批准)）。 |
 | socket 上报 `EACCES` / permission denied | 这个目录的 daemon 是别的系统用户启动的。换成同一个用户，或用你自己的 `CTENO_SDK_HOME`。 |
 | 在 Cteno 桌面 App 里看不到 SDK 建的会话 | SDK 用的是自己的 daemon，会话不在 App 里。想用 App 的 daemon，就传 App 的 `socketPath`。 |
@@ -201,7 +214,9 @@ pip install ./python && python examples/python/quickstart.py
 
 | SDK | 自带 daemon | 有自带 daemon 的平台 |
 |---|---|---|
-| 2.10.12（即将上线） | Cteno 2.10.12 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |
+| 2.10.14 | Cteno 2.10.14 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |
+| 2.10.13 | Cteno 2.10.12 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |
+| 2.10.12（未发布） | Cteno 2.10.12 | – |
 | 2.10.11（未发布） | Cteno 2.10.11 | – |
 | 0.2.0（未发布） | Cteno 2.10.10 | – |
 | 0.1.x | 无，需要运行中的 Cteno App 或 `cteno-host-cli serve` ≥ 2.10.9 | – |
@@ -213,7 +228,7 @@ pip install ./python && python examples/python/quickstart.py
 | Linux x64 | 在没装过 Cteno、没有账号的干净容器里，从 npm 包和 wheel 安装 |
 | macOS arm64 | 与运行中的 Cteno 桌面 App 并存 |
 | Windows x64 | 从 npm 包和 wheel 安装 |
-| macOS x64 | 计划随 2.10.12 支持 |
+| macOS x64 | npm tarball 与 wheel 安装（Apple 芯片上经 Rosetta） |
 | Linux arm64 | 暂不支持（没有 daemon 包） |
 
 ## 已知限制

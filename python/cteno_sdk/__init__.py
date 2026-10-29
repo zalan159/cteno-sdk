@@ -6,7 +6,7 @@
     async def main():
         # Starts (or reuses) the SDK's own local daemon; no Cteno app or login needed.
         async with await CtenoSession.open() as cteno:
-            await cteno.configure_model(base_url="https://api.deepseek.com/anthropic",
+            await cteno.configure_model(base_url="https://api.deepseek.com/anthropic/v1",
                                         model="deepseek-chat", api_key=os.environ["DEEPSEEK_API_KEY"],
                                         api_format="anthropic")
             sid = await cteno.create(spec=AgentSpec(

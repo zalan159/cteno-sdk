@@ -203,6 +203,69 @@ class SessionTest(unittest.TestCase):
         run(scenario())
 
 
+def _acp_error(message, code):
+    return json.dumps({"role": "agent", "content": {"type": "acp", "provider": "cteno", "data": {
+        "type": "error", "message": message, "recoverable": True, "errorCode": code}}})
+
+
+class TurnFailureTest(unittest.TestCase):
+    def test_waited_failure_reply_is_not_ok(self):
+        async def scenario():
+            host = await FakeHost({"send-thread-message": lambda p, s: {
+                "success": False, "waited": True, "errorKind": "E_AUTH",
+                "error": "OpenAI API error (401 Unauthorized): bad key"}}).start()
+            try:
+                client = await CtenoSession.open(host.path)
+                result = await client.run("s1", "q")
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "OpenAI API error (401 Unauthorized): bad key")
+                self.assertEqual(result.error_kind, "E_AUTH")
+                client.close()
+            finally:
+                await host.close()
+        run(scenario())
+
+    def test_error_frame_without_answer_is_not_ok_on_old_daemon(self):
+        async def scenario():
+            def send_message(params, send):
+                send({"method": "local-session-event", "params": {
+                    "channel": "local-session:message-appended",
+                    "payload": {"sessionId": "s1", "message": {"id": "e1", "role": "assistant",
+                                "text": _acp_error("OpenAI API error (404 Not Found): ", "E_EXECUTOR")}}}})
+                return {"success": True, "waited": True}
+            host = await FakeHost({"send-thread-message": send_message,
+                                   "get-session-messages": lambda p, s: {"success": True, "messages": []}}).start()
+            try:
+                client = await CtenoSession.open(host.path)
+                result = await client.run("s1", "q")
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "OpenAI API error (404 Not Found): ")
+                self.assertEqual(result.error_kind, "E_EXECUTOR")
+                client.close()
+            finally:
+                await host.close()
+        run(scenario())
+
+    def test_error_then_answer_is_ok(self):
+        async def scenario():
+            def send_message(params, send):
+                for mid, text in (("e1", _acp_error("503 retrying", "E_PROVIDER")), ("m1", "PONG")):
+                    send({"method": "local-session-event", "params": {
+                        "channel": "local-session:message-appended",
+                        "payload": {"sessionId": "s1", "message": {"id": mid, "role": "assistant", "text": text}}}})
+                return {"success": True, "waited": True}
+            host = await FakeHost({"send-thread-message": send_message}).start()
+            try:
+                client = await CtenoSession.open(host.path)
+                result = await client.run("s1", "q")
+                self.assertTrue(result.ok)
+                self.assertEqual(result.text, "PONG")
+                client.close()
+            finally:
+                await host.close()
+        run(scenario())
+
+
 class DiscoveryTest(unittest.TestCase):
     """The daemon publishes host[.<tag>].sock; headless serve uses host.host.sock."""
 

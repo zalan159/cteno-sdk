@@ -1,6 +1,6 @@
 {
   "name": "@cteno/sdk",
-  "version": "2.10.12",
+  "version": "2.10.14",
   "description": "Run Cteno agents from Node.js. Bundles a local Cteno daemon per platform; no desktop app or account needed.",
   "type": "module",
   "license": "MIT",
@@ -65,7 +65,12 @@
   "cteno": {
     "minDaemonVersion": "2.10.9",
     "agentSpecMinDaemonVersion": "2.10.10",
-    "platforms": ["darwin-arm64", "darwin-x64", "linux-x64", "win32-x64"]
+    "platforms": [
+      "darwin-arm64",
+      "darwin-x64",
+      "linux-x64",
+      "win32-x64"
+    ]
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",

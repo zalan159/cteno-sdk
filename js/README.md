@@ -4,10 +4,7 @@ Run Cteno agents from Node.js. Create a session, send a prompt, stream the answe
 or build your own agent on Cteno with your own system prompt and tools that run in
 your process.
 
-> **The npm package is coming soon** (with Cteno 2.10.12). Until then, build from
-> source and point the SDK at a daemon: see the repository README, "Use from source".
-
-Once published, `npm install @cteno/sdk` also installs the Cteno daemon for your platform
+`npm install @cteno/sdk` also installs the Cteno daemon for your platform
 (`@cteno/sdk-<os>-<arch>`, an optional dependency). `CtenoSession.open()` starts it in
 local mode on first use: no desktop app, no account, your own model key. Requires
 Node ≥ 20.
@@ -15,7 +12,6 @@ Node ≥ 20.
 ## Install
 
 ```bash
-# coming soon — not published yet
 npm install @cteno/sdk
 ```
 
@@ -27,6 +23,11 @@ import { CtenoSession } from '@cteno/sdk/core';
 const cteno = await CtenoSession.open();
 await cteno.configureModel({ baseUrl: 'https://api.openai.com/v1', model: 'gpt-4.1-mini', apiKey: process.env.OPENAI_API_KEY! });
 ```
+
+`baseUrl` is used as given: include the API version (`https://api.openai.com/v1`,
+`https://api.deepseek.com/anthropic/v1`, `https://generativelanguage.googleapis.com/v1beta`);
+the SDK appends only the resource path. A base that is missing or repeats a version
+segment makes `configureModel()` throw with the full URL it would have requested.
 
 See the [repository README](../README.md) for platforms, permissions, the daemon's
 lifecycle and troubleshooting.
@@ -50,7 +51,7 @@ for await (const message of query({ prompt: 'Summarize the files in this folder'
 | `user` | Your prompt, echoed once the daemon durably accepted it |
 | `assistant` | A model frame. `text` always prints; `data` holds the parsed envelope for structured frames (tool calls, task lifecycle) |
 | `status` | Session went thinking/idle — progress UI, safe to ignore |
-| `result` | Turn finished. `ok: false` carries `error`. Always last |
+| `result` | Turn finished. Always last. `ok: false` when the turn failed (model 404/401/429, quota, timeout); `error` is the original error text, `errorKind` its class |
 
 Breaking out of the loop early aborts your local wait and releases the connection;
 the daemon may still be working, exactly like `ctrl-C` on a CLI. Neither a timeout
@@ -75,6 +76,7 @@ const profiles = await session.listProfiles();   // model profiles the daemon ca
 
 await session.close(id);
 session.dispose();
+// ok is false when the model call failed; error then holds the provider's original text
 ```
 
 Tools that are not read-only need approval. Without one the SDK denies them at once

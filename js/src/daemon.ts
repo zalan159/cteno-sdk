@@ -27,7 +27,7 @@
  * always keeps the running daemon.
  */
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir, platform as osPlatform, arch as osArch } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
@@ -284,8 +284,34 @@ export function daemonEnvironment(
  *
  * Never connects to, inspects, or reuses the desktop app's daemon.
  */
+/**
+ * Usable bytes of a Unix socket path (`sun_path` minus its NUL): 103 on macOS,
+ * 107 on Linux. `null` where the endpoint is not a filesystem path (Windows).
+ */
+export function socketPathLimit(platform: NodeJS.Platform = osPlatform()): number | null {
+  if (platform === 'win32') return null;
+  return platform === 'darwin' || platform.endsWith('bsd') ? 103 : 107;
+}
+
+/** Throw CONFIG when the daemon could never bind `layout.endpoint`. */
+export function assertEndpointBindable(layout: InstanceLayout, platform: NodeJS.Platform = osPlatform()): void {
+  const limit = socketPathLimit(platform);
+  if (limit === null) return;
+  const bytes = Buffer.byteLength(layout.endpoint);
+  if (bytes > limit) {
+    throw new SdkError('CONFIG',
+      `daemon home too long: socket path ${layout.endpoint} is ${bytes} bytes, max ${limit} on ${platform}; use a shorter daemon home`);
+  }
+}
+
+/** Prefix of the line a daemon prints when it exits on a fatal startup error. */
+export const DAEMON_FATAL_PREFIX = 'CTENO_DAEMON_FATAL';
+
 export async function ensureDaemon(options: DaemonOptions = {}): Promise<DaemonHandle> {
   const layout = instanceLayout(options.home);
+  // Fail in milliseconds, not after a start timeout: a path the kernel cannot
+  // bind means the daemon would start and never be reachable.
+  assertEndpointBindable(layout);
   const running = await probe(layout.endpoint);
   let binary: DaemonBinary | null = null;
   if (running) {
@@ -311,6 +337,8 @@ export async function ensureDaemon(options: DaemonOptions = {}): Promise<DaemonH
   // Rotate a runaway log before handing it to a new process; the daemon also
   // caps the file it is told about (CTENO_DAEMON_LOG).
   const log = openSync(layout.logFile, 'a');
+  // Only what THIS spawn writes explains its failure; older runs share the file.
+  const logStart = fstatSync(log).size;
   let child;
   try {
     child = spawn(binary.path, ['serve'], {
@@ -335,6 +363,13 @@ export async function ensureDaemon(options: DaemonOptions = {}): Promise<DaemonH
       // `exited` set here means we lost a start race and the winner answered.
       return { layout, binary, started: exited === null, pid: exited === null ? child.pid ?? null : null, version: binary.version };
     }
+    const fatal = fatalLine(layout.logFile, logStart);
+    if (fatal) {
+      // The daemon said why it cannot serve; a concurrent winner is not
+      // coming either (same endpoint), so do not wait for one.
+      throw new SdkError('TRANSPORT',
+        `The bundled Cteno daemon failed to start: ${fatal}${exited ? ` (${describeExit(exited)})` : ''}. Log: ${layout.logFile}\n${startupLog(layout.logFile, logStart)}`);
+    }
     if (exited) {
       // Lost the host-lock race to a concurrent open() (or to a daemon still
       // shutting down): wait for the winner. Anything else is a real failure,
@@ -345,12 +380,12 @@ export async function ensureDaemon(options: DaemonOptions = {}): Promise<DaemonH
         await sleep(200);
       }
       throw new SdkError('TRANSPORT',
-        `The bundled Cteno daemon exited during startup (${describeExit(exited)}). Log: ${layout.logFile}\n${logTail(layout.logFile)}`);
+        `The bundled Cteno daemon exited during startup (${describeExit(exited)}). Log: ${layout.logFile}\n${startupLog(layout.logFile, logStart)}`);
     }
     await sleep(200);
   }
   throw new SdkError('TIMEOUT',
-    `The bundled Cteno daemon did not answer within ${options.startTimeoutMs ?? 60_000}ms. Log: ${layout.logFile}\n${logTail(layout.logFile)}`);
+    `The bundled Cteno daemon did not answer within ${options.startTimeoutMs ?? 60_000}ms. Log: ${layout.logFile}\n${startupLog(layout.logFile, logStart)}`);
 }
 
 /** Ask the SDK's daemon for `home` to exit. Resolves false when none was running. */
@@ -396,6 +431,33 @@ export function lockHeld(lockPath: string): boolean {
 
 function describeExit(exit: { code: number | null; signal: string | null }): string {
   return exit.signal ? `signal ${exit.signal}` : `exit code ${exit.code}`;
+}
+
+/** Log text written since byte `start` (this spawn's output). */
+function logSince(path: string, start: number): string {
+  try {
+    const all = readFileSync(path);
+    return all.subarray(Math.min(start, all.length)).toString('utf8');
+  } catch { return ''; }
+}
+
+function fatalLine(path: string, start: number): string | null {
+  const line = logSince(path, start).split(/\r?\n/).find(l => l.includes(DAEMON_FATAL_PREFIX));
+  return line ? line.slice(line.indexOf(DAEMON_FATAL_PREFIX)).trim() : null;
+}
+
+/**
+ * This spawn's log for an error message: fatal/error lines first (they are
+ * easily pushed out of a plain tail by later startup chatter), then the tail.
+ */
+export function startupLog(path: string, start: number, bytes = 2000): string {
+  const text = logSince(path, start);
+  if (!text) return logTail(path, bytes);
+  const important = text.split(/\r?\n/)
+    .filter(l => l.includes(DAEMON_FATAL_PREFIX) || /\b(ERROR|FATAL)\b/.test(l) || /Failed to bind/.test(l))
+    .slice(-20);
+  const tail = text.slice(Math.max(0, text.length - bytes));
+  return important.length ? `Errors:\n${important.join('\n')}\n--- log tail ---\n${tail}` : tail;
 }
 
 function logTail(path: string, bytes = 2000): string {

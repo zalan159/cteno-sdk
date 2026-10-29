@@ -7,10 +7,24 @@ the version of the Cteno daemon it bundles; see the compatibility table in the R
 
 ## [Unreleased]
 
-## [2.10.12] - unreleased (npm / PyPI coming soon)
+## [2.10.14] - 2026-10-29
 
-The client code is published here as source. The npm and PyPI packages, which bundle
-the daemon, ship together with Cteno 2.10.12. Everything listed under 0.2.0 below is
+First release with one version for the SDK and Cteno: 2.10.14 bundles the Cteno 2.10.14
+daemon. 2.10.13 was the only SDK-only release (it bundled the 2.10.12 daemon); Cteno itself
+skipped 2.10.13.
+
+### Fixed
+- A turn's result reports what really happened: a failed or interrupted turn is no longer
+  returned as `ok: true` with empty text, and environment, model and configuration errors are
+  raised explicitly instead of timing out or silently falling back.
+- `configureModel()` with an explicit versioned `baseUrl` keeps the path you gave; existing
+  configurations are migrated.
+- The daemon fails at startup when it cannot bind its socket, instead of running without one.
+
+
+## [2.10.12] - not published
+
+The client code was published here as source only. Everything listed under 0.2.0 below is
 included; 0.2.0 and 2.10.11 were never published.
 
 ### Changed

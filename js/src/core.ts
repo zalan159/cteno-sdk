@@ -75,6 +75,8 @@ export interface ResultMessage {
   ok: boolean;
   /** Host-provided error text, when `ok` is false. */
   error?: string;
+  /** Stable error class (`E_EXECUTOR`, `E_AUTH`, `E_RATE_LIMIT`, `E_TIMEOUT`, `turn_busy`, …), when known. */
+  errorKind?: string;
 }
 
 /** Session became active/idle. Useful for progress UI; safe to ignore. */
@@ -491,18 +493,28 @@ export class CtenoSession {
     const messages: CtenoMessage[] = [];
     let ok = false;
     let error: string | undefined;
+    let errorKind: string | undefined;
     for await (const message of this.send(options)) {
       messages.push(message);
-      if (message.type === 'result') { ok = message.ok; error = message.error; }
+      if (message.type === 'result') { ok = message.ok; error = message.error; errorKind = message.errorKind; }
     }
     const isAnswer = (m: CtenoMessage): m is AssistantMessage =>
       m.type === 'assistant' && (m.kind === undefined || m.kind === 'message');
     let answers = messages.filter(isAnswer);
+    let turnFrames: CtenoMessage[] = messages;
     if (answers.length === 0) {
       // The final frame can be persisted after the turn boundary reply.
       const history = await this.history(options.sessionId, { limit: 20 }).catch(() => [] as CtenoMessage[]);
       const lastUser = history.map(m => m.type).lastIndexOf('user');
+      turnFrames = [...messages, ...history.slice(lastUser + 1)];
       answers = history.slice(lastUser + 1).filter(isAnswer);
+    }
+    if (ok && answers.length === 0) {
+      // Fallback for daemons without `send.wait.turn-result.v1`: they reply
+      // success once the turn merely ended. An error frame and no answer is a
+      // failed turn; never report it as ok.
+      const failed = turnFrames.map(errorFrameOf).filter(Boolean).pop();
+      if (failed) { ok = false; error = failed.message; errorKind = failed.code; }
     }
     const text = answers.length > 0 ? answers[answers.length - 1].text : '';
     let output: unknown;
@@ -512,7 +524,7 @@ export class CtenoSession {
       const data = object(m.data) && object(m.data.content) && object(m.data.content.data) ? m.data.content.data : {};
       return [{ name: String(data.name ?? ''), callId: String(data.callId ?? ''), input: data.input }];
     });
-    return { ok, error, text, output, toolCalls, messages };
+    return { ok, error, errorKind, text, output, toolCalls, messages };
   }
 
   /** Read or replace a tenant's admission policy (concurrency, daily quota). */
@@ -556,7 +568,15 @@ export class CtenoSession {
       notify?.();
     };
 
-    const unsubscribe = this.onSessionEvent(sessionId, push);
+    // Watch this turn's frames so a failed turn is reported even by a daemon
+    // that replies `success:true` for any turn that ended.
+    const seen = { error: undefined as { message: string; code?: string } | undefined, answered: false };
+    const unsubscribe = this.onSessionEvent(sessionId, message => {
+      const failed = errorFrameOf(message);
+      if (failed) seen.error = failed;
+      else if (message.type === 'assistant' && (message.kind === undefined || message.kind === 'message') && message.text) seen.answered = true;
+      push(message);
+    });
     // A parked approval ends the daemon's turn early and resumes it in a new
     // turn once answered; the caller's turn is over only when that resumed
     // turn is too. `parked` counts answered parks whose resume has not ended.
@@ -564,12 +584,17 @@ export class CtenoSession {
     // card answers are held until the session is idle (`busy` false).
     const gate = {
       parked: 0, replied: false, ok: true, error: undefined as string | undefined,
-      busy: true, held: [] as Array<() => void>,
+      errorKind: undefined as string | undefined, busy: true, held: [] as Array<() => void>,
     };
     const settle = () => {
       if (gate.replied && gate.parked === 0) {
         gate.replied = false;
-        push(gate.ok ? { type: 'result', sessionId, ok: true } : { type: 'result', sessionId, ok: false, error: gate.error });
+        if (gate.ok && seen.error && !seen.answered) {
+          gate.ok = false; gate.error = seen.error.message; gate.errorKind = seen.error.code;
+        }
+        push(gate.ok
+          ? { type: 'result', sessionId, ok: true }
+          : { type: 'result', sessionId, ok: false, error: gate.error, ...(gate.errorKind ? { errorKind: gate.errorKind } : {}) });
       }
     };
     const flush = () => {
@@ -595,6 +620,7 @@ export class CtenoSession {
         .then(result => {
           if (object(result) && result.success === false) {
             gate.ok = false; gate.error = String(result.error ?? 'send failed');
+            if (typeof result.errorKind === 'string') gate.errorKind = result.errorKind;
           }
           gate.replied = true;
           gate.busy = false;
@@ -1055,8 +1081,15 @@ export interface CreateOptions extends CallOptions {
 }
 
 export interface RunResult {
+  /**
+   * False when the turn failed: the model call errored (404/401/429/…), the
+   * turn timed out, or the host refused it. `error` then holds the original
+   * error text and `errorKind` its class. A turn that produced an error frame
+   * and no answer is a failure even when an older daemon replied success.
+   */
   ok: boolean;
   error?: string;
+  errorKind?: string;
   /** Final assistant text. */
   text: string;
   /** Parsed JSON of the final text, when it is JSON (structured output). */
@@ -1078,7 +1111,15 @@ export interface ModelConfig {
   /** Profile id. Default `sdk-default`; saving the same id again replaces it. */
   id?: string;
   name?: string;
-  /** Endpoint root, e.g. `https://api.openai.com/v1` or `https://api.deepseek.com/anthropic`. */
+  /**
+   * API base INCLUDING its version, used exactly as given: the client appends
+   * only the resource path (`/responses`, `/messages`, `/models/...`), never a
+   * version segment. E.g. `https://api.openai.com/v1`,
+   * `https://api.deepseek.com/anthropic/v1`,
+   * `https://generativelanguage.googleapis.com/v1beta`. A base that is missing
+   * a version segment or repeats one is rejected by `configureModel` with the
+   * full URL it would have requested.
+   */
   baseUrl: string;
   model: string;
   /** Your provider key. Stored in the SDK daemon's own data directory. */
@@ -1236,6 +1277,15 @@ function decodeStoredMessage(entry: Record<string, unknown>, sessionId: string):
     return { type: 'assistant', id, sessionId, text: extractText(rawText), data, ...(kind ? { kind } : {}) };
   }
   return null;
+}
+
+/** The error carried by an ACP `error` frame, or undefined for any other frame. */
+function errorFrameOf(message: CtenoMessage): { message: string; code?: string } | undefined {
+  if (message.type !== 'assistant' || message.kind !== 'error') return undefined;
+  const data = object(message.data) && object(message.data.content) && object(message.data.content.data)
+    ? message.data.content.data : {};
+  const text = typeof data.message === 'string' && data.message ? data.message : message.text;
+  return { message: text, ...(typeof data.errorCode === 'string' ? { code: data.errorCode } : {}) };
 }
 
 /** Best-effort plain rendering of a stored frame. */

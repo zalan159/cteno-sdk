@@ -10,7 +10,7 @@ export interface Transport {
   onNotification(listener: (event: Notification) => void): () => void;
   close(): void;
 }
-export type SdkErrorCode = 'CANCELLED' | 'TIMEOUT' | 'CLOSED' | 'TRANSPORT' | 'PROTOCOL' | 'REMOTE' | 'UNSAFE_RAW_DISABLED';
+export type SdkErrorCode = 'CANCELLED' | 'TIMEOUT' | 'CLOSED' | 'TRANSPORT' | 'PROTOCOL' | 'REMOTE' | 'UNSAFE_RAW_DISABLED' | 'CONFIG';
 export class SdkError extends Error {
   constructor(readonly code: SdkErrorCode, message: string, readonly detail?: unknown) {
     super(message); this.name = 'SdkError';

@@ -489,3 +489,64 @@ test('run collects the final text and parses structured output', async () => {
     assert.deepEqual(result.output, { answer: 42 });
   } finally { session.dispose(); host.close(); }
 });
+
+const acpError = (message, errorCode) => JSON.stringify({
+  role: 'agent', content: { type: 'acp', provider: 'cteno', data: { type: 'error', message, recoverable: true, errorCode } },
+});
+
+test('run reports a waited turn failure with the original text and kind', async () => {
+  const host = await startFakeHost({
+    'send-thread-message': () => ({
+      success: false, waited: true, errorKind: 'E_AUTH',
+      error: 'OpenAI API error (401 Unauthorized): {"error":"bad key"}',
+    }),
+  });
+  const session = await CtenoSession.open({ socketPath: host.path });
+  try {
+    const result = await session.run({ sessionId: 's1', prompt: 'q' });
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'OpenAI API error (401 Unauthorized): {"error":"bad key"}');
+    assert.equal(result.errorKind, 'E_AUTH');
+  } finally { session.dispose(); host.close(); }
+});
+
+test('run fails a turn that only produced an error frame even when an old daemon said success', async () => {
+  const host = await startFakeHost({
+    'send-thread-message': async (_params, { push }) => {
+      push('local-session:message-appended', { sessionId: 's1', message: { id: 'u1', role: 'user', text: 'q' } });
+      push('local-session:message-appended', {
+        sessionId: 's1', message: { id: 'e1', role: 'assistant', text: acpError('OpenAI API error (404 Not Found): ', 'E_EXECUTOR') },
+      });
+      return { success: true, waited: true };
+    },
+    'get-session-messages': () => ({ success: true, messages: [] }),
+  });
+  const session = await CtenoSession.open({ socketPath: host.path });
+  try {
+    const result = await session.run({ sessionId: 's1', prompt: 'q' });
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'OpenAI API error (404 Not Found): ');
+    assert.equal(result.errorKind, 'E_EXECUTOR');
+    const streamed = [];
+    for await (const m of session.send({ sessionId: 's1', prompt: 'q' })) streamed.push(m);
+    assert.equal(streamed.at(-1).ok, false, 'send() result frame must also be a failure');
+  } finally { session.dispose(); host.close(); }
+});
+
+test('an error frame followed by a real answer is still a success (recovered turn)', async () => {
+  const host = await startFakeHost({
+    'send-thread-message': async (_params, { push }) => {
+      push('local-session:message-appended', {
+        sessionId: 's1', message: { id: 'e1', role: 'assistant', text: acpError('transient 503, retrying', 'E_PROVIDER') },
+      });
+      push('local-session:message-appended', { sessionId: 's1', message: { id: 'm1', role: 'assistant', text: 'PONG' } });
+      return { success: true, waited: true };
+    },
+  });
+  const session = await CtenoSession.open({ socketPath: host.path });
+  try {
+    const result = await session.run({ sessionId: 's1', prompt: 'q' });
+    assert.equal(result.ok, true);
+    assert.equal(result.text, 'PONG');
+  } finally { session.dispose(); host.close(); }
+});

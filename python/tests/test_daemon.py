@@ -15,6 +15,52 @@ def row(data):
 
 
 class DaemonTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "Windows endpoints are fixed-length pipe names")
+    def test_over_long_home_fails_fast_with_config(self):
+        import asyncio
+        import time
+        start = time.monotonic()
+        with self.assertRaises(daemon.DaemonError) as ctx:
+            asyncio.run(daemon.ensure_daemon("/tmp/" + "x" * 130, start_timeout=20))
+        self.assertLess(time.monotonic() - start, 1.0)
+        self.assertEqual(ctx.exception.code, "CONFIG")
+        self.assertRegex(str(ctx.exception), r"socket path .*host\.host\.sock is \d+ bytes, max 10[37]")
+        self.assertEqual(daemon.socket_path_limit("darwin"), 103)
+        self.assertEqual(daemon.socket_path_limit("linux"), 107)
+        self.assertIsNone(daemon.socket_path_limit("win32"))
+
+    @unittest.skipIf(sys.platform == "win32", "shell fake daemon")
+    def test_fatal_line_fails_fast_with_original_error(self):
+        import asyncio
+        import shutil
+        import tempfile
+        import time
+        d = tempfile.mkdtemp(prefix="sdkf-")
+        fake = os.path.join(d, "cteno-host-cli")
+        with open(fake, "w") as f:
+            f.write("\n".join([
+                "#!/bin/sh",
+                'i=0; while [ $i -lt 90 ]; do echo "[inbox] chatter $i"; i=$((i+1)); done',
+                'echo "CTENO_DAEMON_FATAL bind_failed: Failed to bind /x/run/host.host.sock: Address already in use" >&2',
+                'i=0; while [ $i -lt 110 ]; do echo "[scheduler] chatter $i"; i=$((i+1)); done',
+                "exit 78", ""]))
+        os.chmod(fake, 0o755)
+        saved = os.environ.get("CTENO_SDK_DAEMON_PATH")
+        os.environ["CTENO_SDK_DAEMON_PATH"] = fake
+        start = time.monotonic()
+        try:
+            with self.assertRaises(daemon.DaemonError) as ctx:
+                asyncio.run(daemon.ensure_daemon(os.path.join(d, "h"), start_timeout=20))
+            self.assertLess(time.monotonic() - start, 3.0)
+            self.assertIn("CTENO_DAEMON_FATAL bind_failed: Failed to bind /x/run/host.host.sock: Address already in use",
+                          str(ctx.exception))
+        finally:
+            if saved is None:
+                os.environ.pop("CTENO_SDK_DAEMON_PATH", None)
+            else:
+                os.environ["CTENO_SDK_DAEMON_PATH"] = saved
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_layout_under_one_root(self):
         layout = daemon.instance_layout("/tmp/sdk-root")
         self.assertEqual(layout.data_dir, Path("/tmp/sdk-root/data"))

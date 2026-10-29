@@ -2,7 +2,7 @@
 
 **Run the Cteno agent from your own Node.js or Python code. No desktop app, no account.**
 
-Once published, `npm install @cteno/sdk` or `pip install cteno-sdk` (coming soon) also
+`npm install @cteno/sdk` or `pip install cteno-sdk` also
 installs a small local Cteno daemon for your platform. The first `CtenoSession.open()` starts it in **local mode**:
 no login, no Cteno account, your own model key (BYOK). Your code creates agent sessions,
 streams their output, runs tools you define in your own process, and reads results back.
@@ -20,10 +20,9 @@ unless you pass its socket path explicitly.
 
 Both packages use the same protocol and have the same shape.
 
-> **Status: the npm and PyPI packages are coming soon** (they ship with Cteno 2.10.12).
-> Until then, use the SDK from source: see [Use from source](#use-from-source-today).
-> The `npm install` / `pip install` lines below are marked *coming soon* and will
-> not work yet.
+> **Status:** published on npm and PyPI as 2.10.14 (bundles Cteno 2.10.14). 2.10.13 was a
+> one-off SDK-only release that bundled the 2.10.12 daemon; from 2.10.14 the SDK version is the
+> Cteno version.
 
 ## Contents
 
@@ -41,7 +40,7 @@ Both packages use the same protocol and have the same shape.
 ## Requirements
 
 - Node.js ≥ 20, or Python ≥ 3.9.
-- One of the platforms planned for 2.10.12: macOS (Apple silicon; Intel ≥ 10.15),
+- One of the supported platforms: macOS (Apple silicon; Intel ≥ 10.15),
   Linux x64 with glibc ≥ 2.34 (Ubuntu 22.04+, Debian 12+, RHEL 9+), Windows x64.
   Linux arm64 is not supported yet.
 - **An API key for a model provider** with an OpenAI-, Anthropic- or Gemini-compatible
@@ -68,15 +67,14 @@ cd js && npm install && npm run build && cd ..   # Node: build once, then import
 pip install ./python                             # Python: install the source package
 ```
 
-### From npm / PyPI (coming soon, with Cteno 2.10.12)
+### From npm / PyPI
 
 ```bash
-# coming soon — not published yet
 npm install @cteno/sdk
 pip install cteno-sdk
 ```
 
-Once published, npm installs only the platform package that matches your machine
+npm installs only the platform package that matches your machine
 (`@cteno/sdk-darwin-arm64`, `@cteno/sdk-darwin-x64`, `@cteno/sdk-linux-x64` or `@cteno/sdk-win32-x64`,
 about 20 MB). pip picks the platform wheel the same way. Do not install with
 `--omit=optional` / `--no-optional`: the daemon is an optional dependency.
@@ -94,7 +92,7 @@ import { CtenoSession, query } from '@cteno/sdk/core';
 
 const cteno = await CtenoSession.open();            // starts the bundled daemon on first use
 await cteno.configureModel({
-  baseUrl: 'https://api.openai.com/v1',             // any OpenAI-compatible endpoint
+  baseUrl: 'https://api.openai.com/v1',             // API base incl. its version; used as-is
   model: 'gpt-4.1-mini',
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -140,6 +138,32 @@ prepares its database; later calls attach to the running daemon instantly. For a
 Anthropic- or Gemini-style endpoint pass `apiFormat: 'anthropic'` / `'gemini'`
 (`api_format=` in Python).
 
+**`baseUrl` is used exactly as you give it.** The SDK appends only the resource
+path — `/responses` for `apiFormat: 'openai'` (the OpenAI Responses API),
+`/messages` for `'anthropic'`, `/models/<model>:streamGenerateContent` for
+`'gemini'` — and never adds a version segment. Include the version your provider
+documents:
+
+| Provider | `apiFormat` | `baseUrl` |
+|---|---|---|
+| OpenAI | `openai` | `https://api.openai.com/v1` |
+| DeepSeek | `openai` | `https://api.deepseek.com/v1` |
+| DeepSeek (Anthropic-compatible) | `anthropic` | `https://api.deepseek.com/anthropic/v1` |
+| Anthropic | `anthropic` | `https://api.anthropic.com/v1` |
+| Google Gemini | `gemini` | `https://generativelanguage.googleapis.com/v1beta` |
+
+**Configuration mistakes fail at `configureModel()`, not at the first turn.** A
+`baseUrl` with no version segment, a repeated one (`…/v1/v1`) or a resource path
+(`…/v1/responses`) is rejected with `SdkError('REMOTE')` whose message names the
+full URL that would have been requested.
+
+**`ok` reports the real outcome of the turn.** When the model call fails (404, 401,
+rate limit, quota) or the turn times out, `result.ok` is `false`, `error` is the
+provider's original error text (with the requested URL, e.g.
+`OpenAI API error (404 Not Found) POST https://…/v1/responses: (empty body)`), and
+`errorKind` is its class (`E_EXECUTOR`, `E_AUTH`, `E_RATE_LIMIT`, `E_TIMEOUT`, …).
+`ok: true` means the turn finished and produced an answer.
+
 **What the stream contains.** `query()` / `send()` yield messages with a `type`:
 
 | `type` | Meaning |
@@ -147,7 +171,7 @@ Anthropic- or Gemini-style endpoint pass `apiFormat: 'anthropic'` / `'gemini'`
 | `user` | Your prompt, echoed once the daemon has durably accepted it |
 | `assistant` | One agent frame. Plain answer text has no `kind` (or `kind: 'message'`). Structured frames set `kind` (`thinking`, `tool-call`, `tool-result`, `task_started`, `task_complete`, `context_usage`, …), with the parsed frame in `data` |
 | `status` | Session started or stopped working. Safe to ignore |
-| `result` | The turn finished. Always last. `ok: false` carries `error` |
+| `result` | The turn finished. Always last. `ok: false` when the turn failed (model/auth/quota error, timeout); carries `error` (original text) and `errorKind` |
 
 If you print every `assistant` frame without checking `kind`, you will also see
 raw JSON for thinking and tool frames. That is expected; filter on `kind`.
@@ -348,8 +372,10 @@ credentials for it.
 | From source: `The platform package @cteno/sdk-<platform> is not installed` | A source checkout has no bundled daemon until the npm packages ship. Pass the desktop app's `socketPath`, or set `CTENO_SDK_DAEMON_PATH` (see [Use from source](#use-from-source-today)). |
 | `No bundled Cteno daemon for <os>-<arch>` | Your platform has no prebuilt daemon (see [Requirements](#requirements)). Set `CTENO_SDK_DAEMON_PATH` to a `cteno-host-cli` you built, or pass `socketPath` to a daemon you run yourself. |
 | Python: `This cteno-sdk install has no bundled daemon` | pip installed the sdist (no wheel for your platform, or `--no-binary`). Use `pip install --only-binary=:all: cteno-sdk` on a supported platform, or set `CTENO_SDK_DAEMON_PATH`. |
-| `The bundled Cteno daemon exited during startup` | The error includes the end of `logs/daemon.log` under the instance root. On Linux, `GLIBC_2.34 not found` means the distribution is too old. |
-| `result.ok` is false with a model, auth or quota error | Your model profile cannot run: check `baseUrl`, `model`, `apiKey` and `apiFormat`, then call `configureModel()` again (same `id` replaces it). `listProfiles()` shows what is configured. |
+| `The bundled Cteno daemon exited during startup` / `failed to start: CTENO_DAEMON_FATAL …` | The error leads with the daemon's own fatal line and error lines from this start, then the end of `logs/daemon.log`. On Linux, `GLIBC_2.34 not found` means the distribution is too old. |
+| `daemon home too long: socket path … is N bytes, max M` (`CONFIG`) | The daemon's Unix socket lives at `<home>/run/host.host.sock` and the OS limits that path (103 bytes on macOS, 107 on Linux). Use a shorter `home` / `CTENO_SDK_HOME`. Raised before anything is started. |
+| `configureModel()` rejects the `baseUrl` | The message shows the URL that would have been requested. Use the API base including its version (see the table in the quickstart). |
+| `result.ok` is false with a model, auth or quota error | `error` is the provider's original reply and names the URL that was called. Check `baseUrl`, `model`, `apiKey` and `apiFormat`, then call `configureModel()` again (same `id` replaces it). `listProfiles()` shows what is configured. |
 | A tool call came back denied: "No approver is attached …" | That is the default for non-read-only tools. Pass `canUseTool`, or choose a `permissionMode` (see [Permissions](#permissions-what-runs-without-asking)). |
 | `EACCES` / `permission denied` on the socket | Another OS user started the daemon in this root. Run as the same user, or use your own `CTENO_SDK_HOME`. |
 | You expected your sessions in the Cteno desktop app | The SDK uses its own daemon, so its sessions are not in the app. Pass the app's `socketPath` to use the app's daemon instead. |
@@ -360,7 +386,9 @@ credentials for it.
 
 | SDK | Bundled daemon | Platforms with a bundled daemon |
 |---|---|---|
-| 2.10.12 (coming soon) | Cteno 2.10.12 | macOS arm64 / x64, Linux x64 (glibc ≥ 2.34), Windows x64 |
+| 2.10.14 | Cteno 2.10.14 | macOS arm64 / x64, Linux x64 (glibc ≥ 2.34), Windows x64 |
+| 2.10.13 | Cteno 2.10.12 | macOS arm64 / x64, Linux x64 (glibc ≥ 2.34), Windows x64 |
+| 2.10.12 (not published) | Cteno 2.10.12 | – |
 | 2.10.11 (not published) | Cteno 2.10.11 | – |
 | 0.2.0 (not published) | Cteno 2.10.10 | – |
 | 0.1.x | none: needs a running Cteno app or `cteno-host-cli serve` ≥ 2.10.9 | – |
@@ -373,7 +401,7 @@ and hooks need ≥ 2.10.9; custom agents (`spec` / `AgentSpec`) need ≥ 2.10.10
 | Linux x64 | clean container install from npm tarball and wheel, no Cteno, no account |
 | macOS arm64 | next to a running Cteno desktop app |
 | Windows x64 | npm tarball and wheel install |
-| macOS x64 | planned for 2.10.12 |
+| macOS x64 | npm tarball and wheel install (Rosetta on Apple silicon) |
 | Linux arm64 | not supported yet (no daemon package) |
 
 The daemon advertises its capabilities through `__rpc.hello`

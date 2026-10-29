@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -36,7 +37,33 @@ def _reap_spawned() -> None:
 
 
 class DaemonError(Exception):
-    pass
+    """Daemon start/stop failure. ``code`` is ``CONFIG`` for a setup the daemon
+    can never serve (e.g. an over-long home), else ``TRANSPORT``/``TIMEOUT``."""
+
+    def __init__(self, message: str, code: str = "TRANSPORT"):
+        super().__init__(message)
+        self.code = code
+
+
+DAEMON_FATAL_PREFIX = "CTENO_DAEMON_FATAL"
+
+
+def socket_path_limit(platform: Optional[str] = None) -> Optional[int]:
+    """Usable bytes of a Unix socket path: 103 on macOS/BSD, 107 on Linux, None on Windows."""
+    platform = platform or sys.platform
+    if platform == "win32":
+        return None
+    return 103 if platform == "darwin" or "bsd" in platform else 107
+
+
+def assert_endpoint_bindable(layout: "InstanceLayout", platform: Optional[str] = None) -> None:
+    limit = socket_path_limit(platform)
+    if limit is None:
+        return
+    size = len(os.fsencode(layout.endpoint))
+    if size > limit:
+        raise DaemonError("daemon home too long: socket path %s is %d bytes, max %d on %s; use a shorter daemon home"
+                          % (layout.endpoint, size, limit, platform or sys.platform), code="CONFIG")
 
 
 def _package_dir() -> Path:
@@ -211,6 +238,33 @@ class DaemonHandle:
     version: Optional[str] = None
 
 
+def _log_since(path: Path, start: int) -> str:
+    try:
+        with open(path, "rb") as f:
+            f.seek(start)
+            return f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _fatal_line(path: Path, start: int) -> Optional[str]:
+    for line in _log_since(path, start).splitlines():
+        if DAEMON_FATAL_PREFIX in line:
+            return line[line.index(DAEMON_FATAL_PREFIX):].strip()
+    return None
+
+
+def _startup_log(path: Path, start: int, size: int = 2000) -> str:
+    """This spawn's log: fatal/error lines first, then the tail."""
+    text = _log_since(path, start)
+    if not text:
+        return _tail(path, size)
+    important = [l for l in text.splitlines()
+                 if DAEMON_FATAL_PREFIX in l or re.search(r"\b(ERROR|FATAL)\b", l) or "Failed to bind" in l][-20:]
+    tail = text[-size:]
+    return ("Errors:\n%s\n--- log tail ---\n%s" % ("\n".join(important), tail)) if important else tail
+
+
 def _tail(path: Path, size: int = 2000) -> str:
     try:
         return path.read_text(errors="replace")[-size:] or "(log empty)"
@@ -222,6 +276,8 @@ async def ensure_daemon(home: Optional[os.PathLike] = None, start_timeout: float
                         env: Optional[Dict[str, str]] = None) -> DaemonHandle:
     """Attach to the SDK's daemon for ``home``, starting it if needed."""
     layout = instance_layout(home)
+    # Fail at once: a path the kernel cannot bind means a daemon nobody reaches.
+    assert_endpoint_bindable(layout)
     running = await _probe(layout.endpoint)
     binary: Optional[DaemonBinary] = None
     if running is not _NOT_RUNNING:
@@ -252,6 +308,7 @@ async def ensure_daemon(home: Optional[os.PathLike] = None, start_timeout: float
     else:
         kwargs["start_new_session"] = True
     with open(layout.log_file, "ab") as log:
+        log_start = log.tell()
         proc = subprocess.Popen([str(binary.path), "serve"], env=daemon_environment(layout, binary, extra=env),
                                 cwd=str(layout.root), stdin=subprocess.DEVNULL, stdout=log, stderr=log, **kwargs)
     _SPAWNED.append(proc)
@@ -260,6 +317,13 @@ async def ensure_daemon(home: Optional[os.PathLike] = None, start_timeout: float
         if await _answers(layout.endpoint):
             alive = proc.poll() is None
             return DaemonHandle(layout, binary, alive, proc.pid if alive else None, binary.version)
+        fatal = _fatal_line(layout.log_file, log_start)
+        if fatal:
+            # The daemon said why it cannot serve; no concurrent winner is coming.
+            code = proc.poll()
+            raise DaemonError("The bundled Cteno daemon failed to start: %s%s. Log: %s\n%s"
+                              % (fatal, " (exit code %s)" % code if code is not None else "",
+                                 layout.log_file, _startup_log(layout.log_file, log_start)))
         if proc.poll() is not None:
             # Lost the host-lock race to a concurrent start: wait for the winner.
             winner = min(deadline, time.monotonic() + 15)
@@ -268,10 +332,10 @@ async def ensure_daemon(home: Optional[os.PathLike] = None, start_timeout: float
                     return DaemonHandle(layout, binary, False, None)
                 await asyncio.sleep(0.2)
             raise DaemonError("The bundled Cteno daemon exited during startup (code %s). Log: %s\n%s"
-                              % (proc.returncode, layout.log_file, _tail(layout.log_file)))
+                              % (proc.returncode, layout.log_file, _startup_log(layout.log_file, log_start)))
         await asyncio.sleep(0.2)
     raise DaemonError("The bundled Cteno daemon did not answer within %ss. Log: %s\n%s"
-                      % (start_timeout, layout.log_file, _tail(layout.log_file)))
+                      % (start_timeout, layout.log_file, _startup_log(layout.log_file, log_start)), code="TIMEOUT")
 
 
 async def stop_daemon(home: Optional[os.PathLike] = None, timeout: float = 30.0) -> bool:

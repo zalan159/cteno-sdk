@@ -117,3 +117,49 @@ test('lockHeld: live pid holds, dead pid or garbage does not', async () => {
   writeFileSync(lock, 'junk');
   assert.equal(daemon.lockHeld(lock), false);
 });
+
+test('over-long daemon home fails at once with CONFIG, bytes and the limit', { skip: process.platform === 'win32' }, async () => {
+  const home = join('/tmp', 'x'.repeat(130));
+  const started = Date.now();
+  await assert.rejects(daemon.ensureDaemon({ home, startTimeoutMs: 20_000 }), error => {
+    assert.equal(error.code, 'CONFIG');
+    assert.match(error.message, /socket path .*host\.host\.sock is \d+ bytes, max 10[37]/);
+    return true;
+  });
+  assert.ok(Date.now() - started < 1000, 'must not wait for a start timeout');
+  assert.equal(daemon.socketPathLimit('darwin'), 103);
+  assert.equal(daemon.socketPathLimit('linux'), 107);
+  assert.equal(daemon.socketPathLimit('win32'), null);
+});
+
+test('a daemon that prints CTENO_DAEMON_FATAL and exits fails ensureDaemon fast with that line', { skip: process.platform === 'win32' }, async () => {
+  const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'sdkf-'));
+  const fake = join(dir, 'cteno-host-cli');
+  // 200 lines of startup chatter with the fatal line in the middle: a 2000
+  // byte tail alone would lose it.
+  writeFileSync(fake, [
+    '#!/bin/sh',
+    'i=0; while [ $i -lt 90 ]; do echo "[inbox] startup chatter line $i"; i=$((i+1)); done',
+    'echo "[LocalRPC] Failed to bind /x/run/host.host.sock: Address already in use" ',
+    'echo "CTENO_DAEMON_FATAL bind_failed: Failed to bind /x/run/host.host.sock: Address already in use" >&2',
+    'i=0; while [ $i -lt 110 ]; do echo "[scheduler] more chatter $i"; i=$((i+1)); done',
+    'exit 78',
+  ].join('\n'));
+  chmodSync(fake, 0o755);
+  const saved = process.env.CTENO_SDK_DAEMON_PATH;
+  process.env.CTENO_SDK_DAEMON_PATH = fake;
+  const started = Date.now();
+  try {
+    await assert.rejects(daemon.ensureDaemon({ home: join(dir, 'h'), startTimeoutMs: 20_000 }), error => {
+      assert.equal(error.code, 'TRANSPORT');
+      assert.match(error.message, /CTENO_DAEMON_FATAL bind_failed: Failed to bind \/x\/run\/host\.host\.sock: Address already in use/);
+      return true;
+    });
+    assert.ok(Date.now() - started < 3000, `took ${Date.now() - started}ms`);
+  } finally {
+    if (saved === undefined) delete process.env.CTENO_SDK_DAEMON_PATH; else process.env.CTENO_SDK_DAEMON_PATH = saved;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
