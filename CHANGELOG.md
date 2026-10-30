@@ -7,6 +7,15 @@ the version of the Cteno daemon it bundles; see the compatibility table in the R
 
 ## [Unreleased]
 
+## [2.10.16] - 2026-10-30
+
+Bundles the Cteno 2.10.16 daemon. No SDK API changes.
+
+### Changed
+- The bundled daemon shares MCP connections across sessions, reads the global MCP config
+  it writes (`<data>/mcp_servers.yaml`), cascades session delete/archive to subagent and DAG
+  descendants, and ships `cteno-host-cli doctor`.
+
 ## [2.10.15] - 2026-10-30
 
 Bundles the Cteno 2.10.15 daemon. No SDK API changes.

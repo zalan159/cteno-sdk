@@ -20,7 +20,7 @@ unless you pass its socket path explicitly.
 
 Both packages use the same protocol and have the same shape.
 
-> **Status:** published on npm and PyPI as 2.10.14 (bundles Cteno 2.10.14). 2.10.13 was a
+> **Status:** published on npm and PyPI as 2.10.15 (bundles Cteno 2.10.15). 2.10.13 was a
 > one-off SDK-only release that bundled the 2.10.12 daemon; from 2.10.14 the SDK version is the
 > Cteno version.
 
@@ -386,6 +386,7 @@ credentials for it.
 
 | SDK | Bundled daemon | Platforms with a bundled daemon |
 |---|---|---|
+| 2.10.16 | Cteno 2.10.16 | macOS arm64 / x64, Linux x64 (glibc ≥ 2.34), Windows x64 |
 | 2.10.15 | Cteno 2.10.15 | macOS arm64 / x64, Linux x64 (glibc ≥ 2.34), Windows x64 |
 | 2.10.14 | Cteno 2.10.14 | macOS arm64 / x64, Linux x64 (glibc ≥ 2.34), Windows x64 |
 | 2.10.13 | Cteno 2.10.12 | macOS arm64 / x64, Linux x64 (glibc ≥ 2.34), Windows x64 |

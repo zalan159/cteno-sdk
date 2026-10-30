@@ -16,7 +16,7 @@
 | `@cteno/sdk` | Node.js ≥ 20（ESM，自带 TypeScript 类型） | [`js/`](js/) |
 | `cteno-sdk`（`import cteno_sdk`） | Python ≥ 3.9，只依赖标准库 | [`python/`](python/) |
 
-> **当前状态：**npm 与 PyPI 已发布 2.10.14（内置 Cteno 2.10.14）。2.10.13 是唯一一次单独发布的 SDK 版本，内置的是 2.10.12 的 daemon；从 2.10.14 起 SDK 版本号与 Cteno 一致。
+> **当前状态：**npm 与 PyPI 已发布 2.10.15（内置 Cteno 2.10.15）。2.10.13 是唯一一次单独发布的 SDK 版本，内置的是 2.10.12 的 daemon；从 2.10.14 起 SDK 版本号与 Cteno 一致。
 
 ## 前置条件
 
@@ -214,6 +214,7 @@ pip install ./python && python examples/python/quickstart.py
 
 | SDK | 自带 daemon | 有自带 daemon 的平台 |
 |---|---|---|
+| 2.10.16 | Cteno 2.10.16 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |
 | 2.10.15 | Cteno 2.10.15 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |
 | 2.10.14 | Cteno 2.10.14 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |
 | 2.10.13 | Cteno 2.10.12 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |

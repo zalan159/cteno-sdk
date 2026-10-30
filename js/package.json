@@ -1,6 +1,6 @@
 {
   "name": "@cteno/sdk",
-  "version": "2.10.15",
+  "version": "2.10.16",
   "description": "Run Cteno agents from Node.js. Bundles a local Cteno daemon per platform; no desktop app or account needed.",
   "type": "module",
   "license": "MIT",
