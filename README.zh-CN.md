@@ -214,6 +214,7 @@ pip install ./python && python examples/python/quickstart.py
 
 | SDK | 自带 daemon | 有自带 daemon 的平台 |
 |---|---|---|
+| 2.10.17 | Cteno 2.10.17 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |
 | 2.10.16 | Cteno 2.10.16 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |
 | 2.10.15 | Cteno 2.10.15 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |
 | 2.10.14 | Cteno 2.10.14 | macOS arm64 / x64、Linux x64（glibc ≥ 2.34）、Windows x64 |

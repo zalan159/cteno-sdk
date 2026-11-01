@@ -7,6 +7,15 @@ the version of the Cteno daemon it bundles; see the compatibility table in the R
 
 ## [Unreleased]
 
+## [2.10.17] - 2026-11-02
+
+Bundles the Cteno 2.10.17 daemon. No SDK API changes.
+
+### Changed
+- The bundled daemon links Jelly todos, threads, decision cards and attachments as work items
+  (`jelly.work-items.v1`), adds a stopped thread state that archives on stop, bounds every
+  command hook with a timeout, and acks queued messages on delivery instead of turn end.
+
 ## [2.10.16] - 2026-10-30
 
 Bundles the Cteno 2.10.16 daemon. No SDK API changes.
