@@ -7,6 +7,15 @@ the version of the Cteno daemon it bundles; see the compatibility table in the R
 
 ## [Unreleased]
 
+## [2.10.18] - 2026-11-02
+
+Bundles the Cteno 2.10.18 daemon. No SDK API changes.
+
+### Changed
+- The bundled daemon accepts a per-thread `reasoning_effort` when dispatching work (migration
+  `2026110201`), supports withdrawing an open decision card, and pages the Jelly work-items
+  list (`jelly.work-items.v2`).
+
 ## [2.10.17] - 2026-11-02
 
 Bundles the Cteno 2.10.17 daemon. No SDK API changes.
