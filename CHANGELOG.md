@@ -7,6 +7,14 @@ the version of the Cteno daemon it bundles; see the compatibility table in the R
 
 ## [Unreleased]
 
+## [2.10.19] - 2026-11-02
+
+Bundles the Cteno 2.10.19 daemon. No SDK API changes.
+
+### Changed
+- The bundled daemon accepts structured reply quotes on queued messages (`message-reply.v1`, migration
+  `2026110202`) and keeps the pending queue ack/replay semantics unchanged.
+
 ## [2.10.18] - 2026-11-02
 
 Bundles the Cteno 2.10.18 daemon. No SDK API changes.
