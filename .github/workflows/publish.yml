@@ -158,25 +158,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write          # npm provenance
+      id-token: write          # npm OIDC trusted publishing + provenance
     steps:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
-      - name: Require NPM_TOKEN
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          [ -n "$NODE_AUTH_TOKEN" ] || { echo "::error::repository secret NPM_TOKEN is not set"; exit 1; }
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@latest --registry https://registry.npmjs.org
       - uses: actions/download-artifact@v4
         with:
           name: packages
           path: pkgs
       - name: Publish platform packages first, then @cteno/sdk
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN_FALLBACK: ${{ secrets.NPM_TOKEN }}
         run: |
+          # No NODE_AUTH_TOKEN/.npmrc auth may shadow the OIDC exchange.
+          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npm-oidc.npmrc"
+          printf 'registry=https://registry.npmjs.org/\n' > "$NPM_CONFIG_USERCONFIG"
+          unset NODE_AUTH_TOKEN NPM_TOKEN
           # Tarball paths MUST start with ./ — a bare `pkgs/x.tgz` is read by npm as
           # the GitHub shorthand `owner/repo` and fails with `git ls-remote
           # ssh://git@github.com/pkgs/x.tgz.git` (2.10.14 run 40912318927).
@@ -187,7 +187,21 @@ jobs:
             if npm view "$name@$v" version --registry https://registry.npmjs.org >/dev/null 2>&1; then
               echo "skip $name@$v (already on npm)"; continue
             fi
-            npm publish "$f" --provenance --access public --registry https://registry.npmjs.org
+            if npm publish "$f" --provenance --access public --registry https://registry.npmjs.org; then
+              continue
+            fi
+            # An upload can succeed despite a lost response; never blindly republish.
+            if npm view "$name@$v" version --registry https://registry.npmjs.org >/dev/null 2>&1; then
+              continue
+            fi
+            [ -n "$NPM_TOKEN_FALLBACK" ] || { echo "::error::OIDC failed; no fallback token configured"; exit 1; }
+            echo "::warning::OIDC unavailable for $name; using NPM_TOKEN fallback"
+            auth="$RUNNER_TEMP/npm-fallback.npmrc"
+            trap 'rm -f "$auth"' EXIT
+            umask 077
+            printf 'registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' > "$auth"
+            NODE_AUTH_TOKEN="$NPM_TOKEN_FALLBACK" NPM_CONFIG_USERCONFIG="$auth" npm publish "$f" --provenance --access public --registry https://registry.npmjs.org
+            rm -f "$auth"
           done
 
   pypi:
