@@ -19,7 +19,7 @@
  * any machine can produce every platform's wheel without a compiler.
  */
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, openSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, openSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
@@ -70,6 +70,14 @@ export function validatePayloadInputs(binDir, resources, target) {
 
 function fail(message) { console.error(`pack-platform: ${message}`); process.exit(2); }
 
+function skipSymlinkFilter(src) {
+  if (lstatSync(src).isSymbolicLink()) {
+    console.warn(`pack-platform: warning: skipping symbolic link ${src}`);
+    return false;
+  }
+  return true;
+}
+
 /** Lay out bin/ + resources + manifest + license under `dir`. */
 export function stagePayload({ dir, target, binDir, resources, daemonVersion, license }) {
   const t = TARGETS[target];
@@ -85,7 +93,7 @@ export function stagePayload({ dir, target, binDir, resources, daemonVersion, li
     shipped.push(file);
   }
   for (const sub of RESOURCES) {
-    cpSync(join(resources, sub), join(dir, sub), { recursive: true });
+    cpSync(join(resources, sub), join(dir, sub), { recursive: true, filter: skipSymlinkFilter });
   }
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify({
     schemaVersion: 1, sku: 'sdk-core', version: daemonVersion, target, binaries: shipped,
@@ -115,7 +123,7 @@ export function openPayload(payload) {
 function copyPayload(payloadDir, dir) {
   const manifest = JSON.parse(readFileSync(join(payloadDir, 'manifest.json'), 'utf8'));
   validatePayloadInputs(join(payloadDir, 'bin'), payloadDir, manifest.target);
-  for (const name of readdirSync(payloadDir)) cpSync(join(payloadDir, name), join(dir, name), { recursive: true });
+  for (const name of readdirSync(payloadDir)) cpSync(join(payloadDir, name), join(dir, name), { recursive: true, filter: skipSymlinkFilter });
   return manifest;
 }
 
@@ -188,11 +196,16 @@ function writeZip(path, entries) {
   writeFileSync(path, Buffer.concat([...locals, ...centrals, end]));
 }
 
-function walk(dir, base = dir, out = []) {
+export function walk(dir, base = dir, out = []) {
   for (const name of readdirSync(dir).sort()) {
     const p = join(dir, name);
     if (name === '__pycache__' || name.endsWith('.pyc')) continue;
-    if (statSync(p).isDirectory()) walk(p, base, out); else out.push(p);
+    const st = lstatSync(p);
+    if (st.isSymbolicLink()) {
+      console.warn(`pack-platform: warning: skipping symbolic link ${p}`);
+      continue;
+    }
+    if (st.isDirectory()) walk(p, base, out); else if (st.isFile()) out.push(p);
   }
   return out;
 }
@@ -207,7 +220,7 @@ export function wheel({ out, target, payloadDir, layout }) {
   const version = pyVersion(layout.pyproject);
   const stage = join(out, 'wheel-stage', target);
   rmSync(stage, { recursive: true, force: true });
-  cpSync(layout.pythonPackage, join(stage, 'cteno_sdk'), { recursive: true });
+  cpSync(layout.pythonPackage, join(stage, 'cteno_sdk'), { recursive: true, filter: skipSymlinkFilter });
   mkdirSync(join(stage, 'cteno_sdk', '_bin'), { recursive: true });
   copyPayload(payloadDir, join(stage, 'cteno_sdk', '_bin'));
   const dist = `cteno_sdk-${version}.dist-info`;
@@ -218,7 +231,7 @@ export function wheel({ out, target, payloadDir, layout }) {
     'Home-page: https://github.com/zalan159/cteno-sdk', 'License: MIT (client); daemon binaries: see cteno_sdk/_bin/LICENSE.daemon',
     'Requires-Python: >=3.9', 'Description-Content-Type: text/markdown', '', readme,
   ].join('\n');
-  const files = walk(stage).map(p => ({ name: relative(stage, p).split('\\').join('/'), data: readFileSync(p), mode: statSync(p).mode & 0o777 }));
+  const files = walk(stage).map(p => ({ name: relative(stage, p).split('\\').join('/'), data: readFileSync(p), mode: lstatSync(p).mode & 0o777 }));
   files.push({ name: `${dist}/METADATA`, data: Buffer.from(meta) });
   files.push({ name: `${dist}/WHEEL`, data: Buffer.from(`Wheel-Version: 1.0\nGenerator: cteno pack-platform\nRoot-Is-Purelib: false\nTag: py3-none-${t.wheel}\n`) });
   files.push({ name: `${dist}/top_level.txt`, data: Buffer.from('cteno_sdk\n') });
